@@ -1,0 +1,50 @@
+{
+  "stack": "typescript",
+  "baseBranch": "main",
+  "featuresDir": "features",
+  "lockedPaths": [
+    "features/**/*.feature",
+    "features/**/requirements.md",
+    ".claude/atdd.json",
+    "scripts/atdd/**",
+    "cucumber.mjs",
+    "stryker.config.json",
+    ".dependency-cruiser.cjs",
+    "eslint.config.mjs",
+    "tsconfig.json"
+  ],
+  "commands": {
+    "fastChecks": "python3 scripts/atdd/gate.py fast",
+    "qualityGate": "python3 scripts/atdd/gate.py full",
+    "acceptanceTests": "npx cucumber-js",
+    "unitTests": "npx vitest run",
+    "qaUp": "bash scripts/atdd/qa-up.sh",
+    "qaDown": "bash scripts/atdd/qa-down.sh"
+  },
+  "qa": {
+    "baseUrl": "http://localhost:3000",
+    "healthUrl": "http://localhost:3000/health",
+    "ui": false,
+    "notes": "Describe test accounts, seed data, feature flags and anything else a manual tester needs."
+  },
+  "docs": {
+    "architecture": ["docs/architecture.md", "docs/adr/"],
+    "glossary": "GLOSSARY.md",
+    "issueTracker": "docs/agents/issue-tracker.md"
+  },
+  "limits": { "gherkinRounds": 3, "buildRounds": 5 },
+  "gate": {
+    "sourceDirs": ["src"],
+    "testDirs": ["test", "tests", "features"],
+    "acceptanceRunner": "cucumber",
+    "mutationReport": "reports/mutation/mutation.json",
+    "thresholds": {
+      "diffCoverage": 90,
+      "mutationScore": 80,
+      "cyclomatic": 10,
+      "cognitive": 15,
+      "functionLength": 60,
+      "parameters": 5
+    }
+  }
+}

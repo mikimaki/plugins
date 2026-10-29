@@ -1,0 +1,26 @@
+{
+  "stack": "python",
+  "baseBranch": "main",
+  "featuresDir": "features",
+  "lockedPaths": [
+    "features/**/*.feature",
+    "features/**/requirements.md",
+    ".claude/atdd.json",
+    "scripts/atdd/**"
+  ],
+  "commands": {
+    "fastChecks": "python3 scripts/atdd/gate.py fast",
+    "qualityGate": "python3 scripts/atdd/gate.py full"
+  },
+  "docs": {
+    "architecture": [
+      "docs/adr/"
+    ],
+    "glossary": "GLOSSARY.md",
+    "issueTracker": "docs/agents/issue-tracker.md"
+  },
+  "limits": {
+    "gherkinRounds": 3,
+    "buildRounds": 5
+  }
+}

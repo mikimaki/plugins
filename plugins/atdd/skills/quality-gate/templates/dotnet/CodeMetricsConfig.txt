@@ -1,0 +1,8 @@
+# Thresholds for the .NET code-metrics analyzers (format: RuleId(OptionalSymbolKind): Threshold).
+# CA1502 fires above this cyclomatic complexity; keep it equal to gate.thresholds.cyclomatic in .claude/atdd.json.
+CA1502: 10
+# CA1505 fires below this maintainability index.
+CA1505: 20
+# CA1506 fires above this class coupling.
+CA1506(Type): 60
+CA1506: 30

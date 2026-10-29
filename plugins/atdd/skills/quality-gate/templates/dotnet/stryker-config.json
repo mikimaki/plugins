@@ -1,0 +1,15 @@
+{
+  "stryker-config": {
+    "mutation-level": "Standard",
+    "coverage-analysis": "perTest",
+    "mutate": [
+      "**/*.cs",
+      "!**/*.feature.cs",
+      "!**/Migrations/**",
+      "!**/obj/**",
+      "!**/*.g.cs",
+      "!**/*.Designer.cs"
+    ],
+    "report-file-name": "mutation-report"
+  }
+}

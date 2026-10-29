@@ -1,0 +1,15 @@
+{
+  "name": "personal-skills",
+  "description": "Personal Claude Code plugins.",
+  "owner": {
+    "name": "Daniel",
+    "email": ""
+  },
+  "plugins": [
+    {
+      "name": "atdd",
+      "source": "./plugins/atdd",
+      "description": "Gherkin-first ATDD pipeline: gherkin writer ⇄ reviewer, then implementer → reviewer → QA → quality gate, looping until clean."
+    }
+  ]
+}

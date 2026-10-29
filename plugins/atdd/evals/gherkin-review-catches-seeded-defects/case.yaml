@@ -1,0 +1,6 @@
+schema_version: "1.1"
+name: gherkin-review-catches-seeded-defects
+context:
+  scaffold_script: place-files.sh
+expected_outcome: |
+  A review that does not approve the scenarios and flags each seeded defect: no celebration at exactly the goal (the spec counts equal as reached), the invented email fallback, the missing late-sync rule, the missing time-zone day boundary, the UI-coupled 'clicks Pause celebrations' step, 'the user' instead of the glossary's 'member', and the vague 'works correctly' outcome.

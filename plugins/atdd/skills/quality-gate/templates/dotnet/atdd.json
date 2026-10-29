@@ -1,0 +1,51 @@
+{
+  "stack": "dotnet",
+  "baseBranch": "main",
+  "featuresDir": "tests/__App__.Acceptance/Features",
+  "lockedPaths": [
+    "tests/__App__.Acceptance/Features/**",
+    "tests/__App__.Acceptance/reqnroll.json",
+    ".claude/atdd.json",
+    "scripts/atdd/**",
+    "stryker-config.json",
+    "SonarLint.xml",
+    "CodeMetricsConfig.txt",
+    ".editorconfig",
+    "Directory.Build.props",
+    "Directory.Packages.props",
+    ".config/dotnet-tools.json"
+  ],
+  "commands": {
+    "fastChecks": "python3 scripts/atdd/gate.py fast",
+    "qualityGate": "python3 scripts/atdd/gate.py full",
+    "acceptanceTests": "dotnet test tests/__App__.Acceptance",
+    "unitTests": "dotnet test __App__.sln --filter \"FullyQualifiedName!~Acceptance\"",
+    "qaUp": "bash scripts/atdd/qa-up.sh",
+    "qaDown": "bash scripts/atdd/qa-down.sh"
+  },
+  "qa": {
+    "baseUrl": "http://localhost:5080",
+    "healthUrl": "http://localhost:5080/health",
+    "ui": false,
+    "notes": "Describe test accounts, seed data, feature flags and anything else a manual tester needs."
+  },
+  "docs": {
+    "architecture": ["docs/architecture.md", "docs/adr/"],
+    "glossary": "GLOSSARY.md",
+    "issueTracker": "docs/agents/issue-tracker.md"
+  },
+  "limits": { "gherkinRounds": 3, "buildRounds": 5 },
+  "gate": {
+    "solution": "__App__.sln",
+    "sourceDirs": ["src"],
+    "testDirs": ["tests"],
+    "thresholds": {
+      "diffCoverage": 90,
+      "mutationScore": 80,
+      "cyclomatic": 10,
+      "cognitive": 15,
+      "functionLength": 60,
+      "parameters": 5
+    }
+  }
+}

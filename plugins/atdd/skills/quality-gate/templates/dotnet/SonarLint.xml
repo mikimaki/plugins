@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Parameters for SonarAnalyzer.CSharp rules. Keep S3776's threshold equal to gate.thresholds.cognitive in .claude/atdd.json. -->
+<AnalysisInput xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <Rules>
+    <Rule>
+      <Key>S3776</Key>
+      <Parameters>
+        <Parameter><Key>threshold</Key><Value>15</Value></Parameter>
+        <Parameter><Key>propertyThreshold</Key><Value>3</Value></Parameter>
+      </Parameters>
+    </Rule>
+  </Rules>
+</AnalysisInput>

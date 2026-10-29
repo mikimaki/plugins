@@ -1,0 +1,6 @@
+schema_version: "1.1"
+name: gherkin-flags-contradictory-spec
+context:
+  scaffold_script: place-files.sh
+expected_outcome: |
+  Scenarios for the unambiguous overdue-notice rules (3-day threshold, staff library cards, returned items, 08:00 home-branch time, notice contents), with the contradiction between 'a second notice at 10 days' and 'at most one notice per loan' raised as an open question instead of being silently resolved, and no invented behavior for undefined cases.

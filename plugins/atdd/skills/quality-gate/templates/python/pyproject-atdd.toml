@@ -1,0 +1,36 @@
+# atdd quality gate settings: /atdd:init merges these tables into pyproject.toml.
+# Keep the numbers in step with gate.thresholds in .claude/atdd.json.
+
+[tool.ruff.lint]
+extend-select = ["C901", "PLR0912", "PLR0913", "PLR0915"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.pylint]
+max-args = 5
+max-branches = 12
+max-statements = 50
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = ["mutants", ".atdd", ".venv", "node_modules"]
+bdd_features_base_dir = "features/"
+
+[tool.mutmut]
+source_paths = ["src/"]
+pytest_add_cli_args_test_selection = ["tests/"]
+also_copy = ["features/", "conftest.py"]
+
+[tool.vulture]
+min_confidence = 60
+
+# Architecture contracts: replace with the repo's real layers (see docs/architecture.md and the ADRs).
+# The gate's architecture check is skipped until this table exists.
+# [tool.importlinter]
+# root_package = "myapp"
+#
+# [[tool.importlinter.contracts]]
+# name = "Layers"
+# type = "layers"
+# layers = ["myapp.api", "myapp.application", "myapp.domain"]

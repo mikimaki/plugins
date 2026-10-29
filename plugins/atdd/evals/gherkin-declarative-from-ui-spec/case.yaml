@@ -1,0 +1,6 @@
+schema_version: "1.1"
+name: gherkin-declarative-from-ui-spec
+context:
+  scaffold_script: place-files.sh
+expected_outcome: |
+  Declarative scenarios for the sleep-timer panel: no taps, fields, panels or bars in the steps, while the spec's user-visible messages are asserted verbatim, the 1–180 whole-minute range is covered at its boundaries, and the remembered duration after cancelling is verified.

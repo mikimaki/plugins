@@ -1,0 +1,12 @@
+{
+  "name": "atdd",
+  "displayName": "ATDD pipeline",
+  "version": "0.1.0",
+  "description": "Gherkin-first ATDD pipeline. /atdd:gherkin turns a spec from your issue tracker into reviewed Gherkin scenarios; /atdd:build implements them and loops reviewer → QA → quality gate until clean.",
+  "author": {
+    "name": "Daniel",
+    "email": ""
+  },
+  "license": "MIT",
+  "keywords": ["atdd", "bdd", "gherkin", "code-review", "qa", "mutation-testing", "quality-gate"]
+}

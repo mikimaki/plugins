@@ -1,0 +1,29 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/atdd_guard.py", "edit"],
+            "timeout": 30
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "if": "Bash(git *)",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/atdd_guard.py", "git"],
+            "timeout": 1800
+          }
+        ]
+      }
+    ]
+  }
+}

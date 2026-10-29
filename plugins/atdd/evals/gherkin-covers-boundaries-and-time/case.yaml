@@ -1,0 +1,6 @@
+schema_version: "1.1"
+name: gherkin-covers-boundaries-and-time
+context:
+  scaffold_script: place-files.sh
+expected_outcome: |
+  An approved requirements ledger and declarative Gherkin under features/<key>/ that cover every rule in the step-goal spec, including the equal-to-goal boundary, the 1,000–50,000 range, the member-time-zone day boundary, late syncs and resuming with the kept goal, without inventing behavior.

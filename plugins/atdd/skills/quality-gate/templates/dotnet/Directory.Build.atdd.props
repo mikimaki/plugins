@@ -1,0 +1,19 @@
+<!--
+  atdd quality gate: analyzers and inputs every project needs.
+  /atdd:init merges this into Directory.Build.props (creating it if needed). With Central Package
+  Management (Directory.Packages.props), move the version to a <PackageVersion> there and drop it here.
+-->
+<Project>
+  <PropertyGroup>
+    <!-- Makes IDE0051/IDE0052/IDE0060 report during command-line builds -->
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="SonarAnalyzer.CSharp" Version="10.35.0.4138" PrivateAssets="all"
+                      IncludeAssets="runtime; build; native; contentfiles; analyzers" />
+  </ItemGroup>
+  <ItemGroup>
+    <AdditionalFiles Include="$(MSBuildThisFileDirectory)SonarLint.xml" />
+    <AdditionalFiles Include="$(MSBuildThisFileDirectory)CodeMetricsConfig.txt" />
+  </ItemGroup>
+</Project>
