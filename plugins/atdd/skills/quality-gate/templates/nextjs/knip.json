@@ -1,0 +1,7 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "entry": ["features/steps/**/*.ts", "features/support/**/*.ts", "test/**/*.ts", "scripts/atdd/*.mjs"],
+  "project": ["src/**/*.{ts,tsx}", "features/**/*.ts", "test/**/*.ts"],
+  "ignore": ["src/generated/**"],
+  "ignoreDependencies": ["vitest-monocart-coverage"]
+}

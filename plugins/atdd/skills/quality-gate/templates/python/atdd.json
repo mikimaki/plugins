@@ -36,10 +36,12 @@
     "testDirs": ["tests"],
     "acceptanceTestsDir": "tests/acceptance",
     "thresholds": {
-      "diffCoverage": 90,
+      "diffCoverage": 100,
+      "diffBranchCoverage": 100,
       "mutationScore": 80,
       "cyclomatic": 10,
       "cognitive": 15,
+      "npath": 200,
       "functionLength": 60,
       "parameters": 5
     }

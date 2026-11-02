@@ -1,6 +1,6 @@
 ---
 name: qa-playbook
-description: Manual QA method for the atdd qa agent. Start the app from the repo's ATDD config, replay every Gherkin scenario by hand through real HTTP calls or a real browser, explore around the change with proven heuristics, and file reproducible findings with evidence (Hurl files, curl scripts, screenshots). Use whenever manually testing a feature against a running application.
+description: Manual QA method for the atdd qa agent. Start the app from the repo's ATDD config, replay every Gherkin scenario by hand through real HTTP calls or a real browser, explore around the change with proven heuristics (including Next.js specifics such as server actions, hydration errors and stale data), and file reproducible findings with evidence (Hurl files, curl scripts, screenshots). Use whenever manually testing a feature against a running application.
 ---
 
 # QA playbook
@@ -23,7 +23,7 @@ Read `.claude/atdd.json`:
 Procedure:
 
 1. **Start the app** with `commands.qaUp`. It should return once the app is starting. Don't run a foreground server in your own shell: it would block you.
-2. **Poll the health URL** for up to about 2 minutes before declaring the app broken. If it doesn't come up, that's a **blocker**. Report it with the last 50 lines of the app log (`qa-up` writes it to `.atdd/qa/app.log` unless `qa.notes` says otherwise).
+2. **Poll the health URL** for up to about 2 minutes before declaring the app broken, or about 6 minutes when `qa-up` builds the app first (`qa.notes` says so; a Next.js app does). If it doesn't come up, that's a **blocker**. Report it with the last 50 lines of the app log (`qa-up` writes it to `.atdd/qa/app.log` unless `qa.notes` says otherwise).
 3. **Always run `commands.qaDown` at the end**, also after failures. Stop anything else you started.
 
 ## 2. Replay every scenario by hand
@@ -120,6 +120,15 @@ Spend real effort here; this is where QA earns its keep. Stay within the issue's
 - Behavior after a page refresh.
 
 Pre-existing bugs outside the issue's scope go in as **minor** notes. They aren't this change's fault.
+
+**Next.js apps** (`stack` is `nextjs`). The app runs as a production build. Besides the heuristics above:
+
+- **Read the browser console** on every page you test (`browser_console_messages` in the Playwright MCP tools). A hydration mismatch, an uncaught error or a failed request is a finding even when the page looks right. A production build minifies React's messages ("Minified React error #418"); quote them with the link they print.
+- **Server actions are public POST endpoints.** Client-side checks (`required`, `min`, `max`, `pattern`, disabled buttons) are only a convenience. Remove them in the browser (`browser_evaluate`: `form.noValidate = true`, or remove the attribute) and submit values the server must refuse: empty, out of range, another user's id in a hidden field. A refusal must come from the server, with the spec's message.
+- **Route handlers** (`/api/...`) are tested like any HTTP API, with Hurl.
+- **Fresh data after a change:** after a save, the page, a reload, a second tab and client-side navigation back to it all show the new state. Stale data after a server action usually means a missing `revalidatePath` or `revalidateTag`.
+- **Navigation:** open deep links directly, use back and forward, and reload mid-flow. An unknown id shows the app's not-found page, not an error page; a failing request shows the route's error state, not a blank screen.
+- **Persistence:** check stored state through the app. If the UI can't show it, a read-only query against the development database is acceptable evidence; say so in the finding.
 
 ## 4. Findings
 

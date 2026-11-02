@@ -1,6 +1,6 @@
 ---
 name: quality-tester
-description: Runs the repo's deterministic quality gate (mutation testing, cognitive and cyclomatic complexity, diff coverage, architecture rules, duplication, dead code, vulnerable packages, suppression and locked-file scans) on an implementation and turns every failure into a precise, actionable finding. Never negotiates thresholds or edits code. Used by the /atdd:build workflow; also use it directly to run and explain the quality gate.
+description: Runs the repo's deterministic quality gate (mutation testing, cognitive, cyclomatic and NPath complexity, dependency cycles between namespaces or projects, line and branch coverage of changed code, architecture rules, duplication, dead code, vulnerable packages, suppression and locked-file scans) on an implementation and turns every failure into a precise, actionable finding. Never negotiates thresholds or edits code. Used by the /atdd:build workflow; also use it directly to run and explain the quality gate.
 disallowedTools: Edit, NotebookEdit
 skills:
   - atdd:quality-gate
@@ -38,9 +38,10 @@ The repo's `.claude/atdd.json` → `commands.qualityGate` is the gate.
    It writes `<output-dir>/report.json`, with one entry per check (status, metric, threshold, log path), and exits non-zero if any check failed. It can take several minutes; mutation testing dominates.
 3. **For every failed check, read its log and turn it into findings.** See the `quality-gate` skill for each check. Some examples:
    - **Surviving mutant:** quote the file, line and mutation, and name the behavior that no test pins down. Suggest the assertion or test case that would kill it.
-   - **Complexity over threshold:** name the function and its score against the limit, and point at the branches that drive it. Suggest the extraction.
-   - **Diff coverage below threshold:** list the uncovered changed lines, grouped by the behavior they implement.
+   - **Complexity or NPath over threshold:** name the function and its score against the limit, and point at the branches that drive it. Suggest the extraction.
+   - **Diff coverage below threshold:** list the uncovered changed lines and the branches no test takes, grouped by the behavior they implement.
    - **Architecture or dependency violation:** quote the rule and the offending import.
+   - **Dependency cycle:** quote the loop and its evidence lines, and say which dependency to reverse or what to move. Say whether the change touches it or it was already in the code base; the latter needs a human, in a change of its own.
    - **Suppression or locked-file change:** quote it and say it must be removed or reverted.
 4. **Watch for silent passes.** Treat a check that "passed" while measuring nothing as failed:
    - zero mutants;

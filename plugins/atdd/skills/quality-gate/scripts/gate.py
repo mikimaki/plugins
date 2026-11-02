@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """ATDD quality gate: deterministic pass/fail checks over everything changed since the base commit.
 
-    python3 scripts/atdd/gate.py fast    # commit gate: build, format, lint, tests, steps, complexity, suppressions
+    python3 scripts/atdd/gate.py fast    # commit gate: build, format, lint, tests, steps, complexity, NPath, cycles, suppressions
     python3 scripts/atdd/gate.py full    # adds diff coverage, mutation, duplication, architecture, dead code, ...
     python3 scripts/atdd/gate.py full --only mutation,diff-coverage
 
@@ -14,38 +14,46 @@ directory, default .atdd/quality/latest), ATDD_SCENARIOS_COMMIT (commit holding 
 for the locked-files check). Writes <out>/report.json plus one log per check; exits 1 if any check fails.
 
 Standard library only; Python 3.9+. The tools it drives (lizard, diff-cover, jscpd, Stryker, ...) are
-installed per repo, see the atdd quality-gate skill.
+installed per repo, see the atdd quality-gate skill. Python NPath and Python import cycles are computed here
+with the ast module; C# uses the Roslyn helper in scripts/atdd/dotnet-quality; JS/TS uses ESLint and
+dependency-cruiser.
 """
 
 from __future__ import annotations
 
 import argparse
+import ast
 import csv
 import fnmatch
 import glob
 import json
 import os
+import posixpath
 import re
 import shlex
 import shutil
 import subprocess
 import sys
 import time
+import xml.etree.ElementTree as ElementTree
 from dataclasses import dataclass, field
 from pathlib import Path
 
 JSCPD = "jscpd@5.4.2"
 
 DEFAULT_THRESHOLDS = {
-    "diffCoverage": 90,
+    "diffCoverage": 100,
+    "diffBranchCoverage": 100,
     "mutationScore": 80,
     "cyclomatic": 10,
     "cognitive": 15,
+    "npath": 200,
     "functionLength": 60,
     "parameters": 5,
 }
 
-FAST_CHECKS = ["build", "format", "lint", "tests", "undefined-steps", "complexity", "cognitive", "suppressions"]
+FAST_CHECKS = ["build", "format", "lint", "tests", "undefined-steps", "complexity", "cognitive", "npath",
+               "dependency-cycles", "suppressions"]
 FULL_CHECKS = FAST_CHECKS + ["diff-coverage", "mutation", "duplication", "architecture", "dead-code",
                              "vulnerabilities", "locked-files"]
 
@@ -66,8 +74,7 @@ STACKS = {
     "typescript": {
         "extensions": (".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"),
         "jscpd_format": "typescript,javascript,tsx,jsx",
-        "test_patterns": ["*.test.*", "*.spec.*", "*/__tests__/*", "test/*", "tests/*", "*/test/*", "*/tests/*",
-                          "features/*", "*/features/*", "e2e/*"],
+        "test_patterns": ["*.test.*", "*.spec.*", "*/__tests__/*", "test/*", "tests/*", "*/test/*", "*/tests/*", "e2e/*"],
         "generated_patterns": ["scripts/atdd/*", "*.d.ts", "dist/*", "build/*", "coverage/*", "*/node_modules/*", "node_modules/*",
                                ".features-gen/*", "*/.features-gen/*"],
         "suppressions": [
@@ -90,6 +97,17 @@ STACKS = {
         "manifests": ["pyproject.toml", "requirements*.txt", "poetry.lock", "uv.lock", "Pipfile*", "setup.py", "setup.cfg"],
     },
 }
+STACKS["nextjs"] = {
+    **STACKS["typescript"],
+    "test_patterns": STACKS["typescript"]["test_patterns"] + ["playwright/*", "*/playwright/*"],
+    "generated_patterns": STACKS["typescript"]["generated_patterns"] + [
+        ".next/*", "*/.next/*", "next-env.d.ts", "generated/prisma/*", "*/generated/prisma/*", "playwright-report/*",
+        "test-results/*", "reports/*", "coverage/*"],
+    "suppressions": STACKS["typescript"]["suppressions"] + [
+        r"\.fixme\(", r"\btest\.fail\(", r"\.skipIf\(", r"\.runIf\(", r"\.todo\("],
+    "manifests": STACKS["typescript"]["manifests"] + ["bun.lock", "bun.lockb"],
+}
+NODE_STACKS = ("typescript", "nextjs")
 
 
 @dataclass
@@ -118,9 +136,15 @@ class Gate:
     changed: list = field(default_factory=list)
     added_lines: dict = field(default_factory=dict)
     coverage_reports: list = field(default_factory=list)
+    coverlet_reports: list = field(default_factory=list)
+    branches_measured: bool = False
     _functions: dict | None = None
 
     # ---------- helpers ----------
+
+    @property
+    def node(self) -> bool:
+        return self.stack in NODE_STACKS
 
     def log_path(self, name: str) -> Path:
         return self.out / "logs" / f"{name}.log"
@@ -185,11 +209,18 @@ class Gate:
 
     def code_files(self, include_tests: bool = False) -> list:
         files = [p for p in self.changed if p.endswith(self.profile["extensions"]) and not self.is_generated(p)]
-        if self.stack == "typescript":
+        if self.node:
             files = [p for p in files if not p.endswith(".d.ts")]
         if include_tests:
             return files
         return [p for p in files if not self.is_test(p) and self.in_source_dirs(p)]
+
+    def production_files(self) -> list:
+        """Every production code file in sourceDirs, changed or not: tracked plus untracked, minus git-ignored."""
+        dirs = [d.strip("/") for d in self.gate_config.get("sourceDirs", [])] or ["."]
+        listed = git(self.root, "ls-files", "-co", "--exclude-standard", "--", *dirs).splitlines()
+        return sorted(p for p in set(listed) if p.endswith(self.profile["extensions"]) and (self.root / p).is_file()
+                      and not self.is_generated(p) and not self.is_test(p) and not (self.node and p.endswith(".d.ts")))
 
     def touched_line(self, path: str, line: int) -> bool:
         return line in self.added_lines.get(path, {})
@@ -323,11 +354,14 @@ def check_build(g: Gate, r: Result) -> None:
                         "cyclomatic CA1502, coupling CA1506, unused IDE0051/52/60, nullability, ...). Code you add or "
                         "change must be warning-free:\n" + "\n".join(listing.splitlines()[:30]))
         return
-    if g.stack == "typescript":
+    if g.node:
         if not override and not (g.root / "tsconfig.json").exists():
             r.status, r.detail = "skipped", "No tsconfig.json; nothing to type-check."
             return
-        code = g.run("build", override or "npx --no-install tsc --noEmit")
+        command = "npx --no-install tsc --noEmit"
+        if g.stack == "nextjs" and package_has(g, "prisma"):
+            command = "npx --no-install prisma generate && " + command
+        code = g.run("build", override or command)
     else:
         dirs = " ".join(shlex.quote(d) for d in g.gate_config.get("sourceDirs", [])) or "."
         code = g.run("build", override or f"python3 -m compileall -q {dirs}")
@@ -370,7 +404,7 @@ def check_format(g: Gate, r: Result) -> None:
         command = override
     elif g.stack == "dotnet":
         command = f"dotnet format whitespace . --folder --verify-no-changes --include {quoted}"
-    elif g.stack == "typescript":
+    elif g.node:
         if not package_has(g, "prettier"):
             r.status, r.detail = "skipped", "Prettier isn't a dev dependency; add a formatter or set gate.commands.format."
             return
@@ -411,7 +445,7 @@ def check_lint(g: Gate, r: Result) -> None:
         return
     quoted = " ".join(shlex.quote(f) for f in files)
     report = g.out / "lint.json"
-    if g.stack == "typescript":
+    if g.node:
         if not any((g.root / n).exists() for n in ("eslint.config.js", "eslint.config.mjs", "eslint.config.cjs", "eslint.config.ts")):
             r.status, r.detail = "skipped", "No eslint.config.* in the repo; the cognitive check still enforces complexity."
             return
@@ -476,23 +510,15 @@ def check_tests(g: Gate, r: Result) -> None:
         target = f"{shlex.quote(solution)} " if solution else ""
         if with_coverage:
             results = g.out / "test-results"
-            code = g.run("tests", f"dotnet test {target}--collect:\"XPlat Code Coverage\" --results-directory {shlex.quote(str(results))}")
+            code = g.run("tests", f"dotnet test {target}--collect:\"XPlat Code Coverage;Format=json,cobertura\" "
+                                  f"--results-directory {shlex.quote(str(results))}")
             g.coverage_reports = sorted(glob.glob(str(results / "**" / "coverage.cobertura.xml"), recursive=True))
+            g.coverlet_reports = sorted(glob.glob(str(results / "**" / "coverage.json"), recursive=True))
+            g.branches_measured = True
         else:
             code = g.run("tests", f"dotnet test {target}".strip())
-    elif g.stack == "typescript":
-        code = 0
-        commands = [c for c in (g.configured_command("unitTests"), g.configured_command("acceptanceTests")) if c]
-        if not commands:
-            commands = ["npm test"]
-        for index, command in enumerate(commands):
-            if with_coverage:
-                reports = g.out / f"coverage-{index}"
-                include = " ".join(f"--include {shlex.quote(d.strip('/') + '/**')}" for d in g.gate_config.get("sourceDirs", ["src"]))
-                command = (f"npx --no-install c8 --reporter=cobertura --reporter=text-summary --reports-dir {shlex.quote(str(reports))} "
-                           f"--all {include} {command}")
-                g.coverage_reports.append(str(reports / "cobertura-coverage.xml"))
-            code = max(code, g.run("tests", command, append=index > 0))
+    elif g.node:
+        code = run_node_tests(g, with_coverage)
     else:
         dirs = g.gate_config.get("sourceDirs", [])
         base = g.command_override("pytest") or "python3 -m pytest --ignore=mutants"
@@ -501,6 +527,7 @@ def check_tests(g: Gate, r: Result) -> None:
             cov = " ".join(f"--cov={shlex.quote(d)}" for d in dirs) or "--cov=."
             code = g.run("tests", f"{base} {cov} --cov-branch --cov-report=xml:{shlex.quote(str(report))}")
             g.coverage_reports = [str(report)]
+            g.branches_measured = True
         else:
             code = g.run("tests", base)
     if code != 0:
@@ -540,8 +567,8 @@ def check_undefined_steps(g: Gate, r: Result) -> None:
         else:
             r.detail = f"Strict Reqnroll config ({', '.join(strict)}); undefined or pending steps fail the tests check."
         return
-    if g.stack == "typescript":
-        runner = g.gate_config.get("acceptanceRunner", "cucumber")
+    if g.node:
+        runner = g.gate_config.get("acceptanceRunner", "playwright-bdd" if g.stack == "nextjs" else "cucumber")
         if runner == "playwright-bdd":
             code = g.run("undefined-steps", "npx --no-install bddgen")
             r.log = g.rel(g.log_path("undefined-steps"))
@@ -633,7 +660,7 @@ def check_cognitive(g: Gate, r: Result) -> None:
     quoted = " ".join(shlex.quote(f) for f in files)
     report = g.out / "cognitive.json"
     over = []
-    if g.stack == "typescript":
+    if g.node:
         config = g.root / "scripts" / "atdd" / "eslint.quality.mjs"
         if not config.exists():
             r.status, r.detail = "fail", "scripts/atdd/eslint.quality.mjs is missing; run /atdd:init."
@@ -717,9 +744,127 @@ def check_diff_coverage(g: Gate, r: Result) -> None:
         r.status = "fail"
         r.detail = ("Production code changed, but the coverage reports contain none of the changed lines. Usually the "
                     "report paths don't match the repo paths; a silent 100% would be wrong.")
-    elif code != 0 or percent < limit:
-        r.status = "fail"
-        r.detail = f"Diff coverage {percent}% is below {limit}%. Uncovered changed lines:\n" + "\n".join(uncovered[:30])
+        return
+    branch_limit = g.thresholds["diffBranchCoverage"]
+    branches = changed_branches(g, reports, set(files))
+    r.threshold = f"≥ {limit}% of changed lines, ≥ {branch_limit}% of their branches"
+    r.metric += f"; {branches.describe()}"
+    (g.out / "uncovered-branches.txt").write_text("\n".join(branches.gaps) + ("\n" if branches.gaps else ""), encoding="utf-8")
+    problems = []
+    if code != 0 or percent < limit:
+        problems.append(f"Line coverage {percent}% is below {limit}%. Uncovered changed lines:\n" + "\n".join(uncovered[:30]))
+    if branches.error:
+        problems.append(branches.error)
+    elif branches.percent() < branch_limit:
+        problems.append(f"Branch coverage {branches.percent()}% is below {branch_limit}%. Changed lines with branches "
+                        "no test takes:\n" + "\n".join(branches.gaps[:30]))
+    if problems:
+        r.status, r.detail = "fail", "\n\n".join(problems)
+
+
+@dataclass
+class BranchCoverage:
+    covered: int = 0
+    total: int = 0
+    gaps: list = field(default_factory=list)
+    error: str = ""
+
+    def percent(self) -> float:
+        return round(100.0 * self.covered / self.total, 1) if self.total else 100.0
+
+    def describe(self) -> str:
+        if self.error:
+            return "branches not measured"
+        return f"{self.percent()}% of {self.total} branch(es) on them" if self.total else "no branches on them"
+
+
+def changed_branches(g: Gate, reports: list, files: set) -> BranchCoverage:
+    """Branch coverage of the changed lines. Coverlet's JSON names every branch, so branches taken by different test
+    projects add up; Cobertura only counts them per line, so there the best report for a line counts."""
+    exact = coverlet_branches(g, g.coverlet_reports, files) if g.coverlet_reports else None
+    lines, has_branch_data = exact or cobertura_branches(g, reports, files)
+    result = BranchCoverage()
+    if not has_branch_data and not g.branches_measured:
+        result.error = ("The coverage reports carry no branch data at all, so branch coverage can't be measured. Turn on "
+                        "branch coverage in the test run that writes them (see the quality-gate skill).")
+        return result
+    for (path, number), (covered, total) in sorted(lines.items()):
+        result.covered += covered
+        result.total += total
+        if covered < total:
+            result.gaps.append(f"{path}:{number}: {covered} of {total} branches taken")
+    return result
+
+
+def coverlet_branches(g: Gate, reports: list, files: set):
+    """{(path, line): (covered, total)} from coverlet JSON: {module: {file: {class: {method: {"Lines": {...},
+    "Branches": [{Line, Offset, EndOffset, Path, Ordinal, Hits}]}}}}}. None when a report can't be read."""
+    hits = {}
+    has_branch_data = False
+    for report in reports:
+        try:
+            modules = json.loads(Path(report).read_text(encoding="utf-8-sig"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        for documents in modules.values():
+            for document, classes in documents.items():
+                path = cobertura_path(g, document, [], files)
+                for methods in classes.values():
+                    for method, data in methods.items():
+                        for branch in (data or {}).get("Branches") or []:
+                            if branch.get("IsReachable") is False:
+                                continue
+                            has_branch_data = True
+                            line = branch.get("Line", 0)
+                            if path in files and line in g.added_lines.get(path, {}):
+                                key = (path, line, method, branch.get("Offset"), branch.get("EndOffset"),
+                                       branch.get("Path"), branch.get("Ordinal"))
+                                hits[key] = hits.get(key, 0) + branch.get("Hits", 0)
+    lines = {}
+    for (path, line, *_), count in hits.items():
+        covered, total = lines.get((path, line), (0, 0))
+        lines[(path, line)] = (covered + (count > 0), total + 1)
+    return lines, has_branch_data
+
+
+def cobertura_branches(g: Gate, reports: list, files: set):
+    """{(path, line): (covered, total)} from the condition-coverage of each Cobertura line."""
+    best = {}
+    has_branch_data = False
+    for report in reports:
+        try:
+            root = ElementTree.parse(report).getroot()
+        except (OSError, ElementTree.ParseError):
+            continue
+        sources = [s.text.strip() for s in root.iter("source") if s.text and s.text.strip()]
+        for cls in root.iter("class"):
+            path = cobertura_path(g, cls.get("filename", ""), sources, files)
+            for line in cls.findall("./lines/line"):
+                match = re.search(r"\((\d+)/(\d+)\)", line.get("condition-coverage", ""))
+                if line.get("branch", "").lower() != "true" or not match or int(match.group(2)) == 0:
+                    continue
+                has_branch_data = True
+                number = int(line.get("number", "0"))
+                if path not in files or number not in g.added_lines.get(path, {}):
+                    continue
+                covered, total = int(match.group(1)), int(match.group(2))
+                previous = best.get((path, number))
+                if previous is None or covered * previous[1] > previous[0] * total:
+                    best[(path, number)] = (covered, total)
+    return best, has_branch_data
+
+
+def cobertura_path(g: Gate, filename: str, sources: list, known: set) -> str:
+    name = filename.replace("\\", "/")
+    candidates = [Path(name)] if Path(name).is_absolute() else [Path(source) / name for source in sources] + [g.root / name]
+    for candidate in candidates:
+        try:
+            relative = candidate.resolve().relative_to(g.root.resolve()).as_posix()
+        except (ValueError, OSError):
+            continue
+        if relative in known:
+            return relative
+    return normalize_report_path(name, dict.fromkeys(known))
 
 
 def mutation_score(report: Path, changed_lines: dict) -> dict:
@@ -778,14 +923,14 @@ def check_mutation(g: Gate, r: Result) -> None:
             f"--threshold-high {high} --threshold-low {low} --break-at {limit} -O {shlex.quote(str(out))}")
         code = g.run("mutation", command)
         report = out / "reports" / "mutation-report.json"
-    elif g.stack == "typescript":
+    elif g.node:
         incremental = g.root / ".atdd" / "cache" / "stryker-incremental.json"
         incremental.parent.mkdir(parents=True, exist_ok=True)
         report = g.root / g.gate_config.get("mutationReport", "reports/mutation/mutation.json")
         report.unlink(missing_ok=True)
         command = override or (
-            f"npx --no-install stryker run --mutate {shlex.quote(','.join(files))} --reporters json,clear-text,progress "
-            f"--incremental --incrementalFile {shlex.quote(str(incremental))}")
+            f"npx --no-install stryker run --mutate {shlex.quote(','.join(glob_literal(f) for f in files))} "
+            f"--reporters json,clear-text,progress --incremental --incrementalFile {shlex.quote(str(incremental))}")
         code = g.run("mutation", command)
     else:
         if not g.has_tool("mutmut"):
@@ -831,6 +976,11 @@ def check_mutation(g: Gate, r: Result) -> None:
         r.status = "fail"
         r.detail = (f"Mutation score {result['score']}% is below {limit}%. Each survivor is a behavior no test pins down:\n"
                     + "\n".join(result["survivors"][:40]))
+
+
+def glob_literal(path: str) -> str:
+    """A glob that matches exactly this path, e.g. for Next.js route folders like [id] and (group)."""
+    return re.sub(r"([][(){}*?!+@])", r"\\\1", path)
 
 
 def python_module(path: str) -> str:
@@ -904,8 +1054,8 @@ def check_architecture(g: Gate, r: Result) -> None:
         else:
             r.status, r.detail = "skipped", "No ArchUnitNET/NetArchTest rules in the repo; add them so layering is enforced (see the quality-gate skill)."
         return
-    if g.stack == "typescript":
-        configs = [n for n in (".dependency-cruiser.cjs", ".dependency-cruiser.js", ".dependency-cruiser.mjs", ".dependency-cruiser.json") if (g.root / n).exists()]
+    if g.node:
+        configs = [n for n in DEPCRUISE_CONFIGS if (g.root / n).exists()]
         if not configs:
             r.status, r.detail = "skipped", "No .dependency-cruiser config; add rules so layering is enforced."
             return
@@ -961,7 +1111,7 @@ def check_dead_code(g: Gate, r: Result) -> None:
         r.status, r.detail = "skipped", "No changed production code."
         return
     hits = []
-    if g.stack == "typescript":
+    if g.node:
         out = g.out / "knip.json"
         g.run("dead-code", f"npx --no-install knip --reporter json > {shlex.quote(str(out))}")
         r.log = g.rel(g.log_path("dead-code"))
@@ -1031,8 +1181,8 @@ def check_vulnerabilities(g: Gate, r: Result) -> None:
         except (OSError, json.JSONDecodeError):
             r.status, r.detail = "fail", "Couldn't read the vulnerable-package report:\n" + g.tail(g.log_path("vulnerabilities"), 20)
             return
-    elif g.stack == "typescript":
-        found = g.run("vulnerabilities", "npm audit --omit=dev --audit-level=high") != 0
+    elif g.node:
+        found = g.run("vulnerabilities", node_audit_command(g)) != 0
     else:
         if not g.has_tool("pip-audit"):
             r.status, r.detail = "fail", "pip-audit isn't installed (pip install pip-audit)."
@@ -1105,6 +1255,460 @@ def check_locked_files(g: Gate, r: Result) -> None:
         r.detail = "Locked files changed after the scenarios were approved (revert them; only humans change these):\n" + "\n".join(hits)
 
 
+class GateError(Exception):
+    """A check can't measure what it should: the check fails with this message."""
+
+
+def run_node_tests(g: Gate, with_coverage: bool) -> int:
+    """Unit and acceptance tests. In full mode every place the code runs records V8 coverage under <out>/coverage
+    (see scripts/atdd/coverage.mjs), which then merges it into one Cobertura report."""
+    commands = [c for c in (g.configured_command("unitTests"), g.configured_command("acceptanceTests")) if c] or ["npm test"]
+    coverage = g.out / "coverage"
+    merger = g.root / "scripts" / "atdd" / "coverage.mjs"
+    if with_coverage and not merger.exists():
+        g.log_path("tests").write_text("scripts/atdd/coverage.mjs is missing, so coverage can't be measured; run /atdd:init.\n",
+                                       encoding="utf-8")
+        return 1
+    code = 0
+    for index, command in enumerate(commands):
+        env = {"ATDD_COVERAGE_DIR": str(coverage) if with_coverage else ""}
+        if with_coverage and g.stack == "typescript" and not re.search(r"\bvitest\b", command):
+            env["NODE_V8_COVERAGE"] = str(coverage / "node-v8")
+        code = max(code, g.run("tests", command, append=index > 0, env=env))
+    if with_coverage:
+        code = max(code, g.run("tests", "node scripts/atdd/coverage.mjs merge", append=True,
+                               env={"ATDD_COVERAGE_DIR": str(coverage)}))
+        g.coverage_reports = [str(coverage / "merged" / "cobertura-coverage.xml")]
+        g.branches_measured = True
+    return code
+
+
+def node_audit_command(g: Gate) -> str:
+    if g.stack == "nextjs" and (g.root / "pnpm-lock.yaml").exists():
+        return "pnpm audit --prod --audit-level high"
+    return "npm audit --omit=dev --audit-level=high"
+
+
+# ---------- NPath ----------
+
+def check_npath(g: Gate, r: Result) -> None:
+    files = g.code_files()
+    limit = g.thresholds["npath"]
+    r.threshold = f"≤ {limit} per function"
+    override = g.command_override("npath")
+    if override:
+        code = g.run("npath", override, env={"ATDD_NPATH": str(limit)})
+        r.log = g.rel(g.log_path("npath"))
+        if code != 0:
+            r.status, r.detail = "fail", f"Functions over NPath {limit}:\n" + g.tail(g.log_path("npath"), 30)
+        return
+    if not files:
+        r.status, r.detail = "skipped", "No changed production code."
+        return
+    try:
+        if g.node:
+            measured = node_npaths(g, files, limit)
+        elif g.stack == "python":
+            measured = python_npaths(g, files)
+        else:
+            measured = [{"file": row["File"], "name": row["Name"], "start": row["Start"], "end": row["End"],
+                         "npath": int(row["NPath"])} for row in run_dotnet_quality(g, "npath", files, "npath")]
+    except GateError as error:
+        r.status, r.detail = "fail", str(error)
+        return
+    over = [f"{m['file']}:{m['start']}-{m['end']} {m['name']}: NPath {m['npath']} > {limit}" for m in measured
+            if m["npath"] > limit and g.touched(m["file"], m["start"], m["end"])]
+    log = g.log_path("npath")
+    if not log.exists():
+        log.write_text("\n".join(over) + ("\n" if over else ""), encoding="utf-8")
+    r.log = g.rel(log)
+    r.metric = f"{len(over)} changed function(s) over {limit}"
+    if over:
+        r.status = "fail"
+        r.detail = (f"Changed functions with more than {limit} acyclic execution paths (NPath). Sequential decisions "
+                    "multiply, so split the function where independent decisions follow each other:\n" + "\n".join(over[:30]))
+
+
+def node_npaths(g: Gate, files: list, limit: int) -> list:
+    config = g.root / "scripts" / "atdd" / "eslint.quality.mjs"
+    plugin = g.root / "scripts" / "atdd" / "eslint-npath.mjs"
+    if not plugin.exists() or not config.exists() or "eslint-npath" not in config.read_text(encoding="utf-8"):
+        raise GateError("scripts/atdd/eslint.quality.mjs doesn't load the NPath rule from scripts/atdd/eslint-npath.mjs; "
+                        "copy both from the atdd quality-gate templates (/atdd:init).")
+    report = g.out / "npath.json"
+    quoted = " ".join(shlex.quote(f) for f in files)
+    code = g.run("npath", f"npx --no-install eslint -c {shlex.quote(str(config))} --no-warn-ignored -f json "
+                          f"-o {shlex.quote(str(report))} {quoted}",
+                 env={"ATDD_NPATH": str(limit), "ATDD_COGNITIVE": str(g.thresholds["cognitive"])})
+    try:
+        entries = json.loads(report.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        raise GateError(f"ESLint produced no report (exit {code}):\n" + g.tail(g.log_path("npath"), 20)) from None
+    measured = []
+    for entry in entries:
+        path = g.rel(Path(entry.get("filePath", "")))
+        for message in entry.get("messages", []):
+            if message.get("fatal"):
+                raise GateError(f"{path}:{message.get('line')}: {message.get('message')} (ESLint can't parse it, so its "
+                                "NPath isn't measured)")
+            found = re.match(r"'(.*)' has an NPath complexity of (\d+)", message.get("message", ""))
+            if message.get("ruleId") == "atdd/npath-complexity" and found:
+                measured.append({"file": path, "name": found.group(1), "start": message.get("line", 0),
+                                 "end": message.get("endLine") or message.get("line", 0), "npath": int(found.group(2))})
+    return measured
+
+
+AST_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+
+
+def python_conditions(node) -> int:
+    """C(expression): each `and`/`or` once, each conditional expression twice, each comprehension filter once."""
+    if node is None or isinstance(node, AST_SCOPES):
+        return 0
+    count = 0
+    if isinstance(node, ast.BoolOp):
+        count += len(node.values) - 1
+    elif isinstance(node, ast.IfExp):
+        count += 2
+    elif isinstance(node, ast.comprehension):
+        count += len(node.ifs)
+    return count + sum(python_conditions(child) for child in ast.iter_child_nodes(node))
+
+
+def python_sequence(statements) -> int:
+    product = 1
+    for statement in statements:
+        product *= python_paths(statement)
+    return product
+
+
+def python_paths(node) -> int:
+    """NPath of one statement (Nejmeh, 1988, with the table PMD and Checkstyle document)."""
+    if isinstance(node, ast.If):
+        return python_sequence(node.body) + (python_sequence(node.orelse) if node.orelse else 1) + python_conditions(node.test)
+    if isinstance(node, (ast.For, ast.AsyncFor)):
+        return (python_sequence(node.body) + python_conditions(node.iter) + 1) * python_sequence(node.orelse)
+    if isinstance(node, ast.While):
+        return (python_sequence(node.body) + python_conditions(node.test) + 1) * python_sequence(node.orelse)
+    if isinstance(node, (ast.Try, getattr(ast, "TryStar", ast.Try))):
+        handled = python_sequence(node.body) * python_sequence(node.orelse) + sum(python_sequence(h.body) for h in node.handlers)
+        return handled * python_sequence(node.finalbody)
+    if isinstance(node, (ast.With, ast.AsyncWith)):
+        return max(1, sum(python_conditions(item) for item in node.items)) * python_sequence(node.body)
+    if isinstance(node, getattr(ast, "Match", ())):
+        return python_match_paths(node)
+    if isinstance(node, AST_SCOPES):
+        return 1
+    return max(1, python_conditions(node))
+
+
+def python_match_paths(node) -> int:
+    irrefutable = any(isinstance(case.pattern, ast.MatchAs) and case.pattern.pattern is None and case.guard is None
+                      for case in node.cases)
+    total = python_conditions(node.subject) + (0 if irrefutable else 1)
+    for case in node.cases:
+        alternatives = len(case.pattern.patterns) if isinstance(case.pattern, ast.MatchOr) else 1
+        total += python_sequence(case.body) + python_conditions(case.guard) + alternatives - 1
+    return total
+
+
+def python_npaths(g: Gate, files: list) -> list:
+    measured = []
+    for path in files:
+        try:
+            tree = ast.parse((g.root / path).read_text(encoding="utf-8"), filename=path)
+        except SyntaxError as error:
+            raise GateError(f"{path}:{error.lineno}: Python {sys.version.split()[0]} can't parse it ({error.msg}), so its "
+                            "NPath isn't measured. Run the gate with the project's Python.") from None
+        measured.extend(python_functions(tree, path, ""))
+    return measured
+
+
+def python_functions(node, path: str, prefix: str) -> list:
+    found = []
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            name = f"{prefix}{child.name}"
+            found.append({"file": path, "name": name, "start": child.lineno, "end": child.end_lineno,
+                          "npath": python_sequence(child.body)})
+            found.extend(python_functions(child, path, f"{name}."))
+        elif isinstance(child, ast.Lambda):
+            found.append({"file": path, "name": f"{prefix}<lambda>", "start": child.lineno, "end": child.end_lineno,
+                          "npath": max(1, python_conditions(child.body))})
+            found.extend(python_functions(child, path, prefix))
+        else:
+            found.extend(python_functions(child, path, f"{prefix}{child.name}." if isinstance(child, ast.ClassDef) else prefix))
+    return found
+
+
+def run_dotnet_quality(g: Gate, command: str, files: list, log: str):
+    """Runs scripts/atdd/dotnet-quality (Roslyn from the .NET SDK) over the files and returns its JSON."""
+    project = g.root / "scripts" / "atdd" / "dotnet-quality"
+    if not (project / "dotnet-quality.csproj").exists():
+        raise GateError("scripts/atdd/dotnet-quality is missing; copy templates/dotnet/dotnet-quality (/atdd:init).")
+    listing = g.out / f"dotnet-quality-{command}-files.txt"
+    listing.write_text("\n".join(files) + "\n", encoding="utf-8")
+    out = g.out / f"dotnet-quality-{command}.json"
+    code = g.run(log, ["dotnet", "run", "--project", str(project), "-c", "Release", "--", command, str(listing), str(out)])
+    if code != 0 or not out.exists():
+        raise GateError(f"The C# quality helper failed (exit {code}):\n" + g.tail(g.log_path(log), 20))
+    return json.loads(out.read_text(encoding="utf-8"))
+
+
+# ---------- dependency cycles ----------
+
+DEPCRUISE_CONFIGS = (".dependency-cruiser.cjs", ".dependency-cruiser.js", ".dependency-cruiser.mjs", ".dependency-cruiser.json")
+
+
+def check_dependency_cycles(g: Gate, r: Result) -> None:
+    r.threshold = "0 cycles between namespaces or between projects"
+    override = g.command_override("dependencyCycles")
+    if override:
+        code = g.run("dependency-cycles", override)
+        r.log = g.rel(g.log_path("dependency-cycles"))
+        if code != 0:
+            r.status, r.detail = "fail", "Dependency cycles:\n" + g.tail(g.log_path("dependency-cycles"), 30)
+        return
+    production = g.production_files()
+    if not production:
+        r.status, r.detail = "skipped", "No production code in sourceDirs."
+        return
+    try:
+        builders = {"python": python_dependency_graphs, "dotnet": dotnet_dependency_graphs}
+        namespaces, projects = builders.get(g.stack, node_dependency_graphs)(g, production)
+    except GateError as error:
+        r.status, r.detail = "fail", str(error)
+        return
+    cycles = [("namespace", members, path, namespaces) for members, path in find_cycles(namespaces)] + \
+             [("project", members, path, projects) for members, path in find_cycles(projects)]
+    report = []
+    for kind, members, path, edges in cycles:
+        hops = [edges[(a, b)] for a, b in zip(path, path[1:])]
+        report.append({"kind": kind, "members": members, "cycle": path, "evidence": [text for _, text in hops],
+                       "touchedByThisChange": any(file in g.changed for file, _ in hops)})
+    (g.out / "dependency-cycles.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    log = g.log_path("dependency-cycles")
+    with log.open("a", encoding="utf-8") as handle:
+        handle.write(f"{len({n for edge in namespaces for n in edge})} namespace(s) with dependencies, "
+                     f"{len({n for edge in projects for n in edge})} project(s) with dependencies\n")
+    r.log = g.rel(log)
+    found = {kind: sum(1 for c in report if c["kind"] == kind) for kind in ("namespace", "project")}
+    r.metric = f"{found['namespace']} namespace cycle(s), {found['project']} project cycle(s)"
+    if report:
+        r.status = "fail"
+        r.detail = ("Dependency cycles between namespaces or projects. Break each one by moving the shared piece into a "
+                    "namespace both sides may depend on, or by reversing one dependency (full list: "
+                    f"{g.rel(g.out / 'dependency-cycles.json')}):\n" + "\n".join(describe_cycle(c) for c in report[:15]))
+
+
+def describe_cycle(cycle: dict) -> str:
+    origin = "this change touches it" if cycle["touchedByThisChange"] else "already in the code base"
+    lines = [f"{cycle['kind']} cycle ({origin}): " + " -> ".join(cycle["cycle"])]
+    lines += [f"    {text}" for text in cycle["evidence"]]
+    if len(cycle["members"]) > len(cycle["cycle"]) - 1:
+        lines.append(f"    all {len(cycle['members'])} members: {', '.join(cycle['members'])}")
+    return "\n".join(lines)
+
+
+def add_edge(edges: dict, source: str, target: str, file: str, text: str) -> None:
+    if source != target:
+        edges.setdefault((source, target), (file, text))
+
+
+def find_cycles(edges: dict) -> list:
+    """Strongly connected components of more than one node (Tarjan), each with one shortest loop through it."""
+    graph = {}
+    for source, target in edges:
+        graph.setdefault(source, set()).add(target)
+        graph.setdefault(target, set())
+    index, low, on_stack, stack, components = {}, {}, set(), [], []
+
+    def visit(node):
+        index[node] = low[node] = len(index)
+        stack.append(node)
+        on_stack.add(node)
+
+    for start in sorted(graph):
+        if start in index:
+            continue
+        visit(start)
+        work = [(start, iter(sorted(graph[start])))]
+        while work:
+            node, children = work[-1]
+            child = next((c for c in children if c not in index or c in on_stack), None)
+            if child is not None and child not in index:
+                visit(child)
+                work.append((child, iter(sorted(graph[child]))))
+                continue
+            if child is not None:
+                low[node] = min(low[node], index[child])
+                continue
+            work.pop()
+            if work:
+                low[work[-1][0]] = min(low[work[-1][0]], low[node])
+            if low[node] == index[node]:
+                component = []
+                while not component or component[-1] != node:
+                    component.append(stack.pop())
+                    on_stack.discard(component[-1])
+                if len(component) > 1:
+                    components.append(sorted(component))
+    return [(members, shortest_loop(members, graph)) for members in sorted(components)]
+
+
+def shortest_loop(members: list, graph: dict) -> list:
+    start, inside = members[0], set(members)
+    previous = {start: None}
+    queue = [start]
+    for node in queue:
+        for successor in sorted(graph[node] & inside):
+            if successor == start:
+                path = [node]
+                while previous[path[-1]] is not None:
+                    path.append(previous[path[-1]])
+                return list(reversed(path)) + [start]
+            if successor not in previous:
+                previous[successor] = node
+                queue.append(successor)
+    return members + [start]
+
+
+def owner_of(path: str, roots: set) -> str:
+    """The nearest enclosing directory in roots ('.' for the repo root)."""
+    folder = posixpath.dirname(path)
+    while folder and folder not in roots:
+        folder = posixpath.dirname(folder)
+    return folder or "."
+
+
+def tracked(g: Gate, *patterns: str) -> list:
+    return sorted(set(git(g.root, "ls-files", "-co", "--exclude-standard", "--", *patterns).splitlines()))
+
+
+def node_dependency_graphs(g: Gate, production: list):
+    """Namespaces are directories; projects are the workspace packages (directories holding a package.json)."""
+    dirs = [d.strip("/") for d in g.gate_config.get("sourceDirs", ["src"]) if (g.root / d.strip("/")).exists()]
+    configs = [n for n in DEPCRUISE_CONFIGS if (g.root / n).exists()]
+    config = configs[0] if configs else str(g.out / "depcruise-atdd.cjs")
+    if not configs:
+        ts_config = "tsConfig: { fileName: 'tsconfig.json' }, " if (g.root / "tsconfig.json").exists() else ""
+        Path(config).write_text("module.exports = { options: { " + ts_config + "tsPreCompilationDeps: true, "
+                                "doNotFollow: { path: 'node_modules' } } }\n", encoding="utf-8")
+    out = g.out / "dependency-graph.json"
+    g.run("dependency-cycles", f"npx --no-install depcruise {' '.join(shlex.quote(d) for d in dirs)} "
+                               f"--config {shlex.quote(config)} --output-type json --output-to {shlex.quote(str(out))}")
+    try:
+        modules = json.loads(out.read_text(encoding="utf-8")).get("modules", [])
+    except (OSError, json.JSONDecodeError):
+        raise GateError("dependency-cruiser produced no module graph (npm i -D dependency-cruiser):\n"
+                        + g.tail(g.log_path("dependency-cycles"), 20)) from None
+    known = set(production)
+    if not any(m.get("source") in known for m in modules):
+        raise GateError("dependency-cruiser's module graph contains none of the production files in sourceDirs, so cycles "
+                        "can't be checked; check its config's exclude/includeOnly options.")
+    manifests = {path: json.loads((g.root / path).read_text(encoding="utf-8")) for path in tracked(g, "package.json", ":(glob)**/package.json")}
+    roots = {posixpath.dirname(path) for path in manifests}
+    namespaces, projects = {}, {}
+    for module in modules:
+        source = module.get("source", "")
+        if source not in known:
+            continue
+        for dependency in module.get("dependencies", []):
+            target = dependency.get("resolved", "")
+            if target in known:
+                text = f"{source} imports {target}"
+                add_edge(namespaces, posixpath.dirname(source) or ".", posixpath.dirname(target) or ".", source, text)
+                add_edge(projects, owner_of(source, roots), owner_of(target, roots), source, text)
+    packages = {data.get("name"): posixpath.dirname(path) or "." for path, data in manifests.items() if data.get("name")}
+    for path, data in manifests.items():
+        declared = {name for kind in ("dependencies", "devDependencies", "peerDependencies", "optionalDependencies")
+                    for name in (data.get(kind) or {})}
+        for name in sorted(declared & set(packages)):
+            add_edge(projects, posixpath.dirname(path) or ".", packages[name], path, f"{path} depends on {name}")
+    return namespaces, projects
+
+
+def python_dependency_graphs(g: Gate, production: list):
+    """Namespaces are packages (a module belongs to the package it sits in); projects are the directories holding a
+    pyproject.toml, setup.py or setup.cfg."""
+    import_roots = {}
+    for folder in [d.strip("/") or "." for d in g.gate_config.get("sourceDirs", [])] or ["."]:
+        import_roots[folder] = posixpath.dirname(folder) if (g.root / folder / "__init__.py").exists() else folder
+    modules = {}
+    for path in production:
+        folder = next((f for f in sorted(import_roots, key=len, reverse=True)
+                       if f == "." or path.startswith(f + "/")), ".")
+        root = import_roots[folder]
+        relative = path if root in ("", ".") else path[len(root) + 1:]
+        name = relative[:-3].replace("/", ".")
+        modules[name[: -len(".__init__")] if name.endswith(".__init__") else name] = path
+    package_of = {name: (name if path.endswith("__init__.py") else name.rpartition(".")[0]) or "(top level)"
+                  for name, path in modules.items()}
+    project_roots = {posixpath.dirname(p) for p in tracked(g, ":(glob)**/pyproject.toml", ":(glob)**/setup.py",
+                                                            ":(glob)**/setup.cfg", "pyproject.toml", "setup.py", "setup.cfg")}
+    namespaces, projects = {}, {}
+    for name, path in sorted(modules.items()):
+        try:
+            tree = ast.parse((g.root / path).read_text(encoding="utf-8"), filename=path)
+        except SyntaxError as error:
+            raise GateError(f"{path}:{error.lineno}: Python {sys.version.split()[0]} can't parse it ({error.msg}), so its "
+                            "imports aren't checked for cycles. Run the gate with the project's Python.") from None
+        for line, target in python_imports(tree, name, package_of[name], modules):
+            text = f"{path}:{line} imports {target}"
+            add_edge(namespaces, package_of[name], package_of[target], path, text)
+            add_edge(projects, owner_of(path, project_roots), owner_of(modules[target], project_roots), path, text)
+    return namespaces, projects
+
+
+def python_imports(tree, module: str, package: str, modules: dict):
+    """(line, imported module of this code base) for every import, wherever it sits: lazy and TYPE_CHECKING imports
+    are dependencies too."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                target = longest_known_prefix(alias.name, modules)
+                if target:
+                    yield node.lineno, target
+        elif isinstance(node, ast.ImportFrom):
+            base = node.module or ""
+            if node.level:
+                parts = [] if package == "(top level)" else package.split(".")
+                parent = parts[: len(parts) - (node.level - 1)] if node.level > 1 else parts
+                base = ".".join(parent + ([node.module] if node.module else []))
+            for alias in node.names:
+                target = (f"{base}.{alias.name}" if f"{base}.{alias.name}" in modules else None) or longest_known_prefix(base, modules)
+                if target and target != module:
+                    yield node.lineno, target
+
+
+def longest_known_prefix(name: str, modules: dict):
+    parts = name.split(".")
+    for size in range(len(parts), 0, -1):
+        candidate = ".".join(parts[:size])
+        if candidate in modules:
+            return candidate
+    return None
+
+
+def dotnet_dependency_graphs(g: Gate, production: list):
+    """Namespaces come from the Roslyn helper (a namespace depends on another when its code uses a type declared
+    there); projects from the ProjectReference items of every project file."""
+    namespaces, projects = {}, {}
+    for dependency in run_dotnet_quality(g, "namespaces", production, "dependency-cycles").get("Dependencies", []):
+        add_edge(namespaces, dependency["From"], dependency["To"], dependency["File"],
+                 f"{dependency['File']}:{dependency['Line']} uses {dependency['Symbol']}")
+    for project in tracked(g, "*.csproj", "*.fsproj", "*.vbproj"):
+        try:
+            root = ElementTree.parse(g.root / project).getroot()
+        except (OSError, ElementTree.ParseError) as error:
+            raise GateError(f"Can't read {project}: {error}") from None
+        for element in root.iter():
+            if element.tag.split("}")[-1] == "ProjectReference" and element.get("Include"):
+                target = posixpath.normpath(posixpath.join(posixpath.dirname(project), element.get("Include").replace("\\", "/")))
+                add_edge(projects, project, target, project, f"{project} references {target}")
+    return namespaces, projects
+
+
 CHECKS = {
     "build": check_build,
     "format": check_format,
@@ -1113,6 +1717,8 @@ CHECKS = {
     "undefined-steps": check_undefined_steps,
     "complexity": check_complexity,
     "cognitive": check_cognitive,
+    "npath": check_npath,
+    "dependency-cycles": check_dependency_cycles,
     "diff-coverage": check_diff_coverage,
     "mutation": check_mutation,
     "duplication": check_duplication,

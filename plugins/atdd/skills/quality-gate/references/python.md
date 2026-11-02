@@ -1,6 +1,6 @@
 # Quality gate setup: Python
 
-Templates are in `${CLAUDE_SKILL_DIR}/templates/python/`. These versions were verified end-to-end in October 2026: pytest 9, pytest-bdd 9.0, pytest-cov 7.1, ruff, complexipy 8.3, mutmut 3.8.1, vulture, pip-audit, import-linter, lizard 1.24.3, diff-cover 11 and jscpd 5.4.2.
+Templates are in `${CLAUDE_SKILL_DIR}/templates/python/`. These versions were verified end-to-end in October 2026: pytest 9, pytest-bdd 9.0, pytest-cov 7.1, ruff, complexipy 8.3, mutmut 3.8.1, vulture, pip-audit, import-linter, lizard 1.24.3, diff-cover 11 and jscpd 5.4.2. NPath and dependency cycles need no tool: `gate.py` computes them.
 
 ## Prerequisites
 
@@ -35,7 +35,9 @@ The acceptance tests must bind every scenario with `pytest_bdd.scenarios(...)`. 
 - **Format:** `ruff format --check <changed files>`.
 - **Lint:** `ruff check --output-format json`. Only problems on added lines count.
 - **Cognitive:** `complexipy <changed files> --max-complexity-allowed <cognitive> --output-format json`. Results map to functions with lizard, and only changed functions count.
-- **Tests (full mode):** `python3 -m pytest --ignore=mutants --cov=<sourceDirs> --cov-branch --cov-report=xml:<out>/coverage.xml`.
+- **NPath:** computed by `gate.py` itself from Python's `ast`, for every function and lambda in the changed files; nested functions count on their own. `match` counts its cases like a `switch`, and the `else:` of a loop or `try` counts as code that runs after it. The gate needs a Python that parses the code: a file it can't parse fails the check, so run the gate with the project's Python.
+- **Dependency cycles:** `gate.py` reads every import in the production code under `gate.sourceDirs`, including imports inside functions and under `TYPE_CHECKING`, since those are dependencies too. A module belongs to the package it sits in; projects are the folders holding a `pyproject.toml`, `setup.py` or `setup.cfg`. import-linter's `independence` and `layers` contracts can say more (which way the dependencies must point); the gate's check forbids cycles whether or not contracts exist.
+- **Tests (full mode):** `python3 -m pytest --ignore=mutants --cov=<sourceDirs> --cov-branch --cov-report=xml:<out>/coverage.xml`. The branch data in that report feeds the branch half of diff coverage.
 - **Mutation:** `mutmut run "<module>.*"` for every changed production module, then `mutmut export-cicd-stats`. The score is (killed + timeout) / (total − skipped). `mutmut run` exits 0 even with survivors, so the gate reads the stats file.
   - Unlike .NET and TypeScript, the scope is the whole changed module. mutmut has no line filter.
   - mutmut 3.7+ only re-tests functions whose source changed, so later rounds are fast.

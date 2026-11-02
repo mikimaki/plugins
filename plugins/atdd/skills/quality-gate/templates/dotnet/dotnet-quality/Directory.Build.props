@@ -1,0 +1,10 @@
+<!--
+  Keeps the repo's Directory.Build.props, Central Package Management and analyzer settings away from
+  this helper, and builds it under .atdd/cache/, which git ignores.
+-->
+<Project>
+  <PropertyGroup>
+    <BaseOutputPath>$(MSBuildThisFileDirectory)../../../.atdd/cache/dotnet-quality/bin/</BaseOutputPath>
+    <BaseIntermediateOutputPath>$(MSBuildThisFileDirectory)../../../.atdd/cache/dotnet-quality/obj/</BaseIntermediateOutputPath>
+  </PropertyGroup>
+</Project>

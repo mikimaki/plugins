@@ -27,6 +27,7 @@ Templates are in `${CLAUDE_SKILL_DIR}/templates/dotnet/`. Versions were verified
 | `editorconfig-atdd.ini` | append to `.editorconfig` | Turns on S3776, CA1502/1505/1506/1509 and IDE0051/52/60 as **warnings**. The gate fails on warnings in changed code only, so existing code still builds |
 | `Directory.Build.atdd.props` | merge into `Directory.Build.props` | Adds `SonarAnalyzer.CSharp`, `EnforceCodeStyleInBuild`, and both AdditionalFiles. With Central Package Management, put the version in `Directory.Packages.props` |
 | `dotnet-tools.json` | `.config/dotnet-tools.json` (merge) | `dotnet-stryker` 5.0.0. Run `dotnet tool restore` |
+| `dotnet-quality/` | `scripts/atdd/dotnet-quality/` | The gate's C# helper for NPath and the namespace graph. It compiles against the Roslyn that ships with the SDK, so it needs no NuGet packages, ignores the repo's `Directory.Build.props` and Central Package Management, and builds under `.atdd/cache/`. Don't add it to the solution |
 | `${CLAUDE_SKILL_DIR}/scripts/gate.py` | `scripts/atdd/gate.py` | The gate itself. Copy it unchanged |
 | `../common/qa-up.sh`, `../common/qa-down.sh` | `scripts/atdd/` | Adapt `qa-up.sh` to start the API (and `docker compose` dependencies) |
 
@@ -35,6 +36,8 @@ Templates are in `${CLAUDE_SKILL_DIR}/templates/dotnet/`. Versions were verified
 ```xml
 <PackageReference Include="coverlet.collector" Version="6.*" PrivateAssets="all" />
 ```
+
+The gate asks the collector for two formats, `--collect:"XPlat Code Coverage;Format=json,cobertura"`. diff-cover reads the Cobertura reports for lines. The JSON reports name every branch, so a branch counts as taken when any test project took it: an acceptance test can take one side of an `if` and a unit test the other.
 
 **On .NET 10 with Microsoft.Testing.Platform** (`global.json` → `"test": {"runner": "Microsoft.Testing.Platform"}`), `coverlet.collector` doesn't work. Use `Microsoft.Testing.Extensions.CodeCoverage` and override the coverage run:
 
@@ -46,6 +49,8 @@ Templates are in `${CLAUDE_SKILL_DIR}/templates/dotnet/`. Versions were verified
   "coverageReports": [".atdd/**/test-results/**/*.cobertura.xml"]
 }
 ```
+
+Those reports are Cobertura only, so for each changed line the gate takes the branch counts of the test project that covered most of them. When one line's branches are split across test projects, either cover them from one project, or merge the reports first with `dotnet-coverage merge --output-format cobertura` (it combines branches exactly) and point `coverageReports` at the merged file.
 
 ## Architecture rules
 
@@ -77,10 +82,15 @@ public class LayeringTests
   - `--tl:off` turns off the terminal logger, whose output isn't meant for parsing.
   - The gate parses `file(line,col): warning CODE: message` lines. It keeps those in changed files that sit on an added line or inside a changed function (function ranges come from lizard).
 - **Format:** `dotnet format whitespace . --folder --verify-no-changes --include <changed .cs files>`. Exit 2 means files need formatting. Style rules come from the build (`EnforceCodeStyleInBuild`).
+- **NPath:** `dotnet run --project scripts/atdd/dotnet-quality -c Release -- npath <file list> <out.json>`. It measures every method, constructor, accessor, operator, local function and lambda in the changed files, from the syntax tree alone, so it runs before or without a build. Switch expressions count their arms, and pattern combinators (`and`, `or`) count like `&&` and `||`.
+- **Dependency cycles:**
+  - Namespaces: the same helper with `namespaces` compiles all production code under `gate.sourceDirs` and records which namespace's code uses a type declared in another (any use: a parameter, a `new`, a static call, an attribute). `using` directives alone don't count. Compile errors don't stop it; a type it can't resolve just adds no dependency.
+  - Projects: the `ProjectReference`s of every `*.csproj` in the repo. MSBuild refuses to build such a cycle, so the build check usually reports it first.
+- **Tests (full mode):** `dotnet test <solution> --collect:"XPlat Code Coverage;Format=json,cobertura" --results-directory <out>/test-results`, which writes one `coverage.json` and one `coverage.cobertura.xml` per test project.
 - **Mutation:** `dotnet stryker --solution <sln> --since:<base> -r json … -O <out>/stryker`.
   - Stryker exits 2 below `--break-at`.
   - The gate computes its own score over mutants on **changed lines** from `<out>/stryker/reports/mutation-report.json`.
   - `--since` needs the base commit locally. In CI, fetch enough history (`fetch-depth: 0`).
 - **Vulnerabilities:** `dotnet package list --vulnerable --include-transitive --format json` on SDK 10+, falling back to `dotnet list package` on older SDKs. Both exit 0 even when they find vulnerabilities, so the gate counts the findings in the JSON itself.
 
-**Not verified end-to-end:** the .NET path was written against current docs and tool source. It wasn't run against a real solution while this plugin was built. The first time you run `/atdd:init` and the gate in a .NET repo, read `.atdd/quality/latest/logs/*.log` once to confirm every tool ran as expected.
+**Not verified end-to-end:** the .NET path was written against current docs and tool source. It wasn't run against a real solution with NuGet packages while this plugin was built. The NPath and dependency-cycle checks were run against a sample solution on SDK 8.0.133 and 10.0.114, and the branch counting against coverlet-format reports written by hand. The first time you run `/atdd:init` and the gate in a .NET repo, read `.atdd/quality/latest/logs/*.log` once to confirm every tool ran as expected, `tests.log` in particular.

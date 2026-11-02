@@ -11,7 +11,7 @@ You implement one issue, acceptance-test first. The approved Gherkin scenarios a
 
 1. a code reviewer;
 2. a QA engineer who uses the running app;
-3. a deterministic quality gate: mutation testing, complexity, diff coverage, architecture rules, duplication, suppressions.
+3. a deterministic quality gate: mutation testing, complexity (cyclomatic, cognitive, NPath), dependency cycles, line and branch coverage of every changed line, architecture rules, duplication, suppressions.
 
 Whatever they flag comes back to you. The fastest way through is work that passes all three the first time.
 
@@ -46,11 +46,13 @@ The repo's `.claude/atdd.json` holds the commands: `fastChecks`, `acceptanceTest
    - Fake only what's outside the system boundary: third-party services, the clock, the email gateway.
 
    A step definition that calls internals, mocks the thing under test, or asserts nothing turns the scenario into a lie. The reviewer, QA and mutation testing are all designed to catch that.
-3. **Implement until every scenario passes.** Add focused unit tests for logic with branches or edge cases the scenarios don't pin down; mutation testing will find the gaps otherwise.
+3. **Implement until every scenario passes.** Add focused unit tests for logic with branches or edge cases the scenarios don't pin down; mutation testing will find the gaps otherwise. The gate requires every changed line, and every branch on it, to run in some test. Code no test can reach (a defensive check for an impossible state, a fallback nobody asked for) doesn't belong in the change.
 4. **Refactor while green.** Apply the coding standards: small functions, honest names, no narration comments, no speculative abstraction, no defensive bloat.
 5. **Run the fast checks yourself:** `commands.fastChecks` from the config. Then commit with a message like `feat(<issue-key>): <what the feature does>`.
 
    A hook re-runs the fast checks and refuses the commit while they fail or while locked files are modified. Read the log it points to, fix the cause, and commit again.
+
+   The fast checks include dependency cycles across the whole code base. A cycle your change closes is yours to break. One that was already in the code base (the report says so) is outside the issue: report `blocked`, naming the cycle, so a human breaks it in a change of its own.
 
 ## Fix rounds
 

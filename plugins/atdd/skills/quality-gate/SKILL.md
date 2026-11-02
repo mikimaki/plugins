@@ -1,6 +1,6 @@
 ---
 name: quality-gate
-description: The atdd plugin's deterministic quality gate, a Python script that /atdd:init installs into each repo as scripts/atdd/gate.py. Covers what each check measures (build analyzers, lint, tests, unbound steps, cyclomatic and cognitive complexity, diff coverage, mutation testing, duplication, architecture rules, dead code, vulnerable dependencies, suppressions, locked files), how to run it, how to read report.json, and how to turn failures into actionable findings. Also covers per-stack setup for .NET, TypeScript and Python. Use whenever running, interpreting, setting up or tuning the atdd quality gate, or explaining why it failed.
+description: The atdd plugin's deterministic quality gate, a Python script that /atdd:init installs into each repo as scripts/atdd/gate.py. Covers what each check measures (build analyzers, lint, tests, unbound steps, cyclomatic, cognitive and NPath complexity, dependency cycles between namespaces or projects, line and branch coverage of changed code, mutation testing, duplication, architecture rules, dead code, vulnerable dependencies, suppressions, locked files), how to run it, how to read report.json, and how to turn failures into actionable findings. Also covers per-stack setup for .NET, TypeScript, Next.js (React, Prisma, MySQL) and Python. Use whenever running, interpreting, setting up or tuning the atdd quality gate, or explaining why it failed.
 ---
 
 # The quality gate
@@ -38,44 +38,85 @@ The gate judges **the change, not the history**. Every check is scoped to what c
 - lines added since the base;
 - functions that contain such lines.
 
-A legacy file with old problems doesn't fail the gate because someone touched one line in it. A function someone changed must meet the bar in full, though. The one exception is **format**: formatters work per file, so a touched file must be formatted as a whole.
+A legacy file with old problems doesn't fail the gate because someone touched one line in it. A function someone changed must meet the bar in full, though. Two exceptions:
+
+- **format:** formatters work per file, so a touched file must be formatted as a whole.
+- **dependency-cycles:** a cycle is a property of the whole code base, so any cycle fails the gate, including one that was there before the change. The report says which cycles the change touches and which were already in the code base. `/atdd:init` lists the existing ones, so the team knows what to break before the first `/atdd:build`.
 
 ## The checks
 
-| Check | Measures | .NET | TypeScript | Python | Fails when |
+The TypeScript column covers Next.js too; where Next.js differs, the cell says so.
+
+| Check | Measures | .NET | TypeScript / Next.js | Python | Fails when |
 |---|---|---|---|---|---|
-| `build` | compiles; analyzer warnings | `dotnet build` + Roslyn/Sonar analyzers | `tsc --noEmit` | `compileall` | build error, or any warning in changed code |
+| `build` | compiles; analyzer warnings | `dotnet build` + Roslyn/Sonar analyzers | `tsc --noEmit` (Next.js with Prisma: `prisma generate` first) | `compileall` | build error, or any warning in changed code |
 | `format` | formatting | `dotnet format whitespace` | Prettier | `ruff format` | a changed file isn't formatted |
 | `lint` | linter rules | (analyzers in `build`) | repo ESLint | `ruff check` | a problem on an added line |
-| `tests` | all tests pass (+ coverage in `full`) | `dotnet test` (+ coverlet) | unit + acceptance (+ c8) | `pytest` (+ pytest-cov) | any test fails |
-| `undefined-steps` | every Gherkin step bound exactly once | Reqnroll `missingOrPendingStepsOutcome: Error` | cucumber dry run / `bddgen` | `scenarios()` binds all | undefined, ambiguous or unbound steps |
+| `tests` | all tests pass (+ coverage in `full`) | `dotnet test` (+ coverlet, JSON and Cobertura) | unit + acceptance (+ V8 coverage merged by `coverage.mjs`; Next.js: Vitest, the Next.js server and Chromium) | `pytest` (+ pytest-cov with branches) | any test fails |
+| `undefined-steps` | every Gherkin step bound exactly once | Reqnroll `missingOrPendingStepsOutcome: Error` | cucumber dry run / `bddgen` (Next.js: `bddgen`) | `scenarios()` binds all | undefined, ambiguous or unbound steps |
 | `complexity` | cyclomatic complexity, function length, parameters | lizard | lizard | lizard | a changed function exceeds a limit |
 | `cognitive` | cognitive complexity | Sonar S3776 (in `build`) | sonarjs via `eslint.quality.mjs` | complexipy | a changed function exceeds the limit |
-| `diff-coverage` | share of changed lines covered | diff-cover | diff-cover | diff-cover | below `diffCoverage`, or changed files missing from the report |
+| `npath` | NPath complexity: the number of acyclic paths through a function | `scripts/atdd/dotnet-quality` (Roslyn from the SDK) | `atdd/npath-complexity` in `eslint.quality.mjs` | computed in `gate.py` (`ast`) | a changed function exceeds `npath` |
+| `dependency-cycles` | cycles between namespaces and between projects, in all production code | Roslyn namespace graph + `ProjectReference`s | dependency-cruiser graph: folders, workspace packages | `gate.py` import graph: packages, `pyproject.toml` projects | **any** cycle, new or old |
+| `diff-coverage` | share of changed lines covered, and of the branches on them | diff-cover + coverlet branches | diff-cover + Cobertura branches | diff-cover + coverage.py branches | below `diffCoverage` or `diffBranchCoverage`, changed files missing from the report, or no branch data |
 | `mutation` | share of mutants on changed lines killed | Stryker.NET `--since` | StrykerJS `--mutate <changed>` | mutmut (changed modules) | below `mutationScore` |
 | `duplication` | new copy-paste vs the base | jscpd `--baseline-from-ref` | same | same | any new clone |
 | `architecture` | layering and dependency rules | ArchUnitNET/NetArchTest tests | dependency-cruiser | import-linter | a rule is broken (skipped until rules exist) |
 | `dead-code` | unused code introduced | IDE0051/52/60 (in `build`) | knip | vulture | unused code on added lines |
-| `vulnerabilities` | known-vulnerable packages | `dotnet package list --vulnerable` | `npm audit` | `pip-audit` | vulnerable **and** this change touched dependency manifests; otherwise `warn` |
-| `suppressions` | new pragmas, ignores, skips | `#pragma warning disable`, `[ExcludeFromCodeCoverage]`, `Skip =`, … | `eslint-disable`, `@ts-ignore`, `.skip(`, `.only(`, … | `# noqa`, `# type: ignore`, `pytest.mark.skip`, … | any new one |
+| `vulnerabilities` | known-vulnerable packages | `dotnet package list --vulnerable` | `npm audit` (Next.js with `pnpm-lock.yaml`: `pnpm audit`) | `pip-audit` | vulnerable **and** this change touched dependency manifests; otherwise `warn` |
+| `suppressions` | new pragmas, ignores, skips | `#pragma warning disable`, `[ExcludeFromCodeCoverage]`, `Skip =`, … | `eslint-disable`, `@ts-ignore`, `.skip(`, `.only(`, `v8 ignore`, … (Next.js also `.fixme(`, `test.fail(`, `.todo(`) | `# noqa`, `# type: ignore`, `pytest.mark.skip`, … | any new one |
 | `locked-files` | scenarios, ledger, gate scripts and threshold configs untouched | `lockedPaths` | `lockedPaths` | `lockedPaths` | any changed after `ATDD_SCENARIOS_COMMIT` |
 
 **Default thresholds** live in `gate.thresholds`:
 
 | Threshold | Default |
 |---|---|
-| `diffCoverage` | 90 (%) |
+| `diffCoverage` | 100 (% of changed lines) |
+| `diffBranchCoverage` | 100 (% of the branches on changed lines) |
 | `mutationScore` | 80 (%) |
 | `cyclomatic` | 10 |
 | `cognitive` | 15 |
+| `npath` | 200 (paths per function) |
 | `functionLength` | 60 (lines of code) |
 | `parameters` | 5 |
 
+Zero dependency cycles isn't a threshold: it can't be configured.
+
 **Which checks run in each mode** comes from `gate.fast` / `gate.full`. When unset:
-- `fast`: build, format, lint, tests, undefined-steps, complexity, cognitive, suppressions.
+- `fast`: build, format, lint, tests, undefined-steps, complexity, cognitive, npath, dependency-cycles, suppressions.
 - `full`: everything.
 
-**Overriding a check's command.** `gate.commands.<check>` replaces the command a check runs: for example, a `testsWithCoverage` command for .NET 10 MTP repos. The override's exit code decides the result.
+**Overriding a check's command.** `gate.commands.<check>` replaces the command a check runs: for example, a `testsWithCoverage` command for .NET 10 MTP repos, or `npath` and `dependencyCycles` for a tool of the repo's own. The override's exit code decides the result.
+
+### What NPath, cycles and branch coverage mean here
+
+**NPath** (Nejmeh, 1988) counts the acyclic execution paths through a function. Decisions in sequence multiply: eight independent `if`s make 2⁸ = 256 paths, while cyclomatic complexity only says 9. Every stack uses the rules PMD and Checkstyle document:
+- an `if` adds its branches' paths, plus one for a missing `else`;
+- loops add one path for not running;
+- a `switch` adds its cases;
+- `&&`, `||`, `??` (and their assignment forms) and C#'s `and`/`or` patterns add one each, and `?:` adds two;
+- `try` adds its `catch` blocks; `finally` multiplies.
+
+Nested functions and lambdas are measured on their own.
+
+**A dependency cycle** is a loop in the "depends on" graph of production code (tests and generated code are left out):
+
+| Stack | A namespace is | A project is | A depends on B when |
+|---|---|---|---|
+| .NET | a C# namespace | a `*.csproj` | code in A uses a type declared in B; a `ProjectReference` |
+| TypeScript / Next.js | a folder | a workspace package (a folder with a `package.json`) | a module in A imports one in B; a declared dependency on B |
+| Python | a package | a folder with a `pyproject.toml`, `setup.py` or `setup.cfg` | a module in A imports one in B, wherever the import sits |
+
+The report names one shortest loop per cycle, with the file (and, for .NET and Python, the line) behind every hop, plus all members when the tangle is larger than the loop.
+
+**Branch coverage** counts the branches that start on changed lines and checks that tests take each one. A branch is code that runs only sometimes: either side of an `if` or `?:`, the right of `&&`/`||`/`??`, a `case`. The tools differ slightly:
+- coverage.py and coverlet also count an `if`'s missing `else`;
+- V8 (TypeScript, Next.js) doesn't, but still counts an `if` whose body never ran.
+
+The tests can come from several runs: .NET runs one per test project, TypeScript and Next.js add Vitest, Cucumber or Playwright, the Next.js server and the browser. A line and its branches count as covered when any run covered them:
+- TypeScript and Next.js merge all V8 coverage before converting it;
+- .NET adds up coverlet's JSON reports, which name every branch;
+- with Cobertura reports only (a `testsWithCoverage` override), the best report for each line counts, because Cobertura doesn't say which branches ran.
 
 ### Silent passes are failures
 
@@ -86,7 +127,9 @@ A gate that passes while measuring nothing is worse than no gate. These guards a
 - **Zero mutants on the changed lines:** `skipped` with the reason, never a NaN pass.
 - **Coverage that doesn't measure the change:**
   - fails when the coverage reports contain none of the changed lines (a path mismatch);
-  - fails when a changed production file is missing from the reports.
+  - fails when a changed production file is missing from the reports;
+  - fails when reports from a `testsWithCoverage` override carry no branch data at all.
+- **Unmeasurable code:** a changed file the NPath parser can't read fails the check instead of being skipped, and so does a dependency-cruiser graph that contains none of the production files.
 - **A crashing check** fails.
 - **Stale results:** the output directory is wiped at the start of every run, so leftovers from earlier runs can't count.
 
@@ -97,7 +140,9 @@ A gate that passes while measuring nothing is worse than no gate. These guards a
 | `report.json` | `passed`, `base`, `head`, `changedFiles`, `thresholds`, and `checks[]` with `{name, status, metric, threshold, detail, log, seconds}`. `status` is `pass`, `fail`, `warn` or `skipped` |
 | `logs/<check>.log` | full tool output, starting with the exact command |
 | `build-warnings.txt` | .NET warnings in changed code |
+| `dependency-cycles.json` | every cycle: `kind` (namespace or project), `members`, the shortest `cycle`, the `evidence` for each hop, and `touchedByThisChange` |
 | `uncovered-lines.txt` | changed lines no test executes, per file |
+| `uncovered-branches.txt` | `file:line: n of m branches taken` for changed lines with branches no test takes |
 | `mutation-survivors.txt` | `file:line: mutator -> replacement [Survived/NoCoverage]`; for Python, mutmut mutant names (`mutmut show <name>`) |
 | `jscpd/jscpd-report.json` | clone pairs |
 | `lint.json`, `cognitive.json`, `diff-cover.json` | raw tool reports |
@@ -114,7 +159,9 @@ The implementer gets your findings, not the logs. Write each one so it can be fi
   - IDE0051/IDE0052/IDE0060: unused member, value or parameter. Delete it, or use it.
   - CS86xx: nullability. Model the null case, don't `!` it away.
 - **complexity / cognitive.** Name the function, its score and the limit. Point at the constructs driving it (nested ifs, flag parameters, long `else if` chains) and suggest the extraction or early return that brings it under.
-- **diff-coverage.** Group the uncovered lines by the behavior they implement, and say which test level fits. A scenario's path that isn't covered means a step definition doesn't reach it.
+- **npath.** Name the function, its NPath and the limit. Independent decisions in sequence multiply, so point at the runs of sequential `if`s, `&&`/`||` chains and `?:`s, and suggest splitting them into named steps that each own one decision (or a lookup table instead of a chain of conditions).
+- **dependency-cycles.** Quote the loop with its evidence lines. Say which dependency to reverse or which shared piece to move into a namespace both sides may depend on, following the architecture docs. A cycle the change touches is a blocker for the implementer. A cycle that was already in the code base still fails the gate: report it as a blocker addressed to a human, because breaking it is usually outside the issue's scope.
+- **diff-coverage.** Group the uncovered lines by the behavior they implement, and say which test level fits. A scenario's path that isn't covered means a step definition doesn't reach it. For a branch gap (`file:line: 1 of 2 branches taken`), name the condition on that line and the case no test exercises, e.g. "no test saves a goal for a member who already has one". Code no test can reach (a defensive check, a fallback for an impossible state) should go, not get a contrived test.
 - **mutation.**
   - Group survivors by function.
   - For each group, state the behavior no test pins down, e.g. "no test tells a value exactly at the limit from one just above it; the `<=` → `<` mutant survives".
@@ -134,13 +181,24 @@ The implementer gets your findings, not the logs. Write each one so it can be fi
 
 - `${CLAUDE_SKILL_DIR}/references/dotnet.md`
 - `${CLAUDE_SKILL_DIR}/references/typescript.md`
+- `${CLAUDE_SKILL_DIR}/references/nextjs.md`: Next.js with React, Prisma and MySQL. It builds on the TypeScript setup.
 - `${CLAUDE_SKILL_DIR}/references/python.md`
 
-The per-stack templates sit in `${CLAUDE_SKILL_DIR}/templates/<stack>/`, the QA start and stop templates in `templates/common/` (`qa-up.sh`, `qa-down.sh`), and the gate itself in `scripts/gate.py`.
+The per-stack templates sit in `${CLAUDE_SKILL_DIR}/templates/<stack>/`, the QA start and stop templates in `templates/common/` (`qa-up.sh`, `qa-down.sh`; Next.js has its own), and the gate itself in `scripts/gate.py`. Next.js also uses the TypeScript stack's `coverage.mjs`, `cobertura-reporter.mjs`, `eslint.quality.mjs` and `eslint-npath.mjs`.
 
 **Changing a threshold** is a human decision. Edit `gate.thresholds` in `.claude/atdd.json`. Keep the tools' own copies in step:
 
 - .NET: `SonarLint.xml` (S3776) and `CodeMetricsConfig.txt` (CA1502);
 - Python: ruff's `mccabe` and `pylint` settings.
 
-The gate itself reads `gate.thresholds`.
+The gate itself reads `gate.thresholds`, and hands `cognitive` and `npath` to `eslint.quality.mjs` for TypeScript and Next.js.
+
+## Upgrading a repo set up before NPath, cycles and branch coverage
+
+1. Copy `scripts/gate.py` over `scripts/atdd/gate.py`.
+2. Add `"diffBranchCoverage": 100` and `"npath": 200` to `gate.thresholds`, and set `diffCoverage` to 100. Unset thresholds take these defaults anyway.
+3. Add the stack's new files:
+   - **.NET:** `templates/dotnet/dotnet-quality/` to `scripts/atdd/dotnet-quality/`.
+   - **TypeScript:** `eslint-npath.mjs`, the new `eslint.quality.mjs`, `coverage.mjs` and `cobertura-reporter.mjs` to `scripts/atdd/`; then switch coverage from c8 to Monocart as `references/typescript.md` describes.
+   - **Python:** nothing; `gate.py` computes NPath and the import graph itself.
+4. Run `python3 scripts/atdd/gate.py fast --only npath,dependency-cycles` and `python3 scripts/atdd/gate.py full --only diff-coverage`. Existing dependency cycles fail every run from now on, including the implementer's commit hook: break them in a separate change before the next `/atdd:build`.

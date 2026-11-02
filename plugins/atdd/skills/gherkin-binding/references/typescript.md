@@ -7,6 +7,7 @@
 **Which runner:**
 - **APIs and services:** Cucumber.js (`@cucumber/cucumber`).
 - **UI features tested in a browser:** playwright-bdd.
+- **A Next.js app** (stack `nextjs`): see `nextjs.md`.
 
 ## Cucumber.js (API / service)
 
@@ -86,7 +87,7 @@ Then('the display name is still {string}', async function (this: AppWorld, displ
 
 **External HTTP fakes:** use `msw` (node) or `nock`, never the app's own modules.
 
-**Coverage:** `npx c8 --reporter=cobertura --reports-dir=coverage/acceptance npx cucumber-js`.
+**Coverage:** nothing to set up here. While the quality gate measures coverage, it runs Cucumber with `NODE_V8_COVERAGE` and merges the result with the unit tests' (see the quality-gate skill).
 
 **Mutation testing** with `@stryker-mutator/cucumber-runner`: `"testRunner": "cucumber"`, and for tsx/ESM `"testRunnerNodeArgs": ["--import", "tsx"]`.
 

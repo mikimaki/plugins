@@ -1,6 +1,6 @@
 ---
 name: architecture-review
-description: How to judge whether a change's modules, layering, dependencies and boundaries make sense in this codebase, using its ADRs, architecture docs and established patterns as the yardstick. Used by the atdd reviewer to review and by the implementer to build to the same bar. Use whenever reviewing or designing where new code belongs, how modules depend on each other, or whether a structure fits the architecture.
+description: How to judge whether a change's modules, layering, dependencies and boundaries make sense in this codebase, using its ADRs, architecture docs and established patterns as the yardstick, with zero dependency cycles as a hard rule and default layering for Next.js App Router apps. Used by the atdd reviewer to review and by the implementer to build to the same bar. Use whenever reviewing or designing where new code belongs, how modules depend on each other, or whether a structure fits the architecture.
 ---
 
 # Architecture review
@@ -19,8 +19,10 @@ Work through these sources in order of authority:
    - **Top-level structure:** projects, packages, modules and their roles.
    - **Dependency direction:**
      - .NET: `ProjectReference`s in `*.csproj`, namespaces;
-     - TypeScript: imports and path aliases, plus `.dependency-cruiser.cjs` if present;
+     - TypeScript and Next.js: imports and path aliases, plus `.dependency-cruiser.cjs` if present;
      - Python: package imports, plus `[tool.importlinter]` contracts if present.
+
+     The quality gate's `dependency-cycles` check walks the same graph and fails on any cycle. You judge what it can't: whether each dependency points the way the architecture wants.
    - **One comparable feature, traced end to end.** Find an existing feature most like this one: an endpoint, handler, job or page. Follow it from entry point to persistence. That trace is the pattern this change should follow.
 4. **The glossary** (`GLOSSARY.md`). Names of modules, types and functions should use its terms.
 
@@ -33,9 +35,16 @@ Work through these sources in order of authority:
 **Dependency direction.** Dependencies should only point the way the architecture allows:
 - domain/core never references infrastructure, web or UI;
 - features don't reach into each other's internals;
-- no cycles.
+- **no cycles, ever**, between namespaces, folders, packages or projects. Two of them that depend on each other can only be understood, tested and changed together. The gate fails on any cycle anywhere in the code base, old ones included.
 
-A wrong-direction dependency is a **blocker**: it quietly erodes the architecture for everyone after.
+A wrong-direction dependency or a cycle is a **blocker**: it quietly erodes the architecture for everyone after. When the change closes a loop, say which dependency to reverse, or which shared piece to move to a place both sides may depend on.
+
+**Next.js App Router apps**, unless the repo's own docs say otherwise:
+- `src/app` holds routes (pages, layouts, route handlers, loading and error states) and composes features. Nothing outside it imports from it.
+- A feature's components, server actions, queries and rules live together, e.g. `src/features/<feature>/`. Features use each other's public functions, never their internals.
+- The Prisma client is reached only from server modules marked `import 'server-only'` (queries, actions, route handlers), never from Client Components.
+- `'use client'` sits on the smallest components that need state, effects or browser APIs. Pages and layouts stay Server Components, so data loads on the server.
+- Server actions and route handlers are public endpoints: each validates its input and checks permissions itself.
 
 **Cohesion.** Do things that change together live together? Watch for:
 - a feature smeared across unrelated folders;

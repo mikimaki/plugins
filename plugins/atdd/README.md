@@ -42,7 +42,7 @@ To try changes without installing, run `claude --plugin-dir ~/personal-skills/pl
    - QA start/stop scripts;
    - the strict Gherkin runner config.
 
-   Commit what it adds.
+   Commit what it adds. If it lists existing dependency cycles, break them in a change of their own first: every gate run fails while there are any.
 2. **Write the spec** with Matt Pocock's skills (`/grill-with-docs`, `/to-spec`). The spec lands in your issue tracker.
 3. **Run `/atdd:gherkin PROJ-45`.** Accepted references:
    - a tracker key or `#123`;
@@ -93,10 +93,10 @@ claude -p "/atdd:build PROJ-45" --permission-mode dontAsk --allowedTools "Workfl
 | Skill | Contents |
 |---|---|
 | `gherkin-style` | The house rules for scenarios, plus `scripts/gherkin_check.py`, a deterministic coverage and structure checker |
-| `gherkin-binding` | How to bind scenarios honestly in .NET (Reqnroll), TypeScript (Cucumber.js/playwright-bdd) and Python (pytest-bdd) |
-| `coding-standards` | A copy of your non-negotiable clean-code standards plus the C# rules from your Cowork skills, with domain-neutral examples. Keep the rules in sync, or delete one copy |
-| `architecture-review` | How to judge whether modules and dependencies fit the codebase |
-| `qa-playbook` | The manual QA method and the evidence format |
+| `gherkin-binding` | How to bind scenarios honestly in .NET (Reqnroll), TypeScript (Cucumber.js/playwright-bdd), Next.js (playwright-bdd against the production build, Vitest and React Testing Library for units) and Python (pytest-bdd) |
+| `coding-standards` | A copy of your non-negotiable clean-code standards plus the C# rules from your Cowork skills, with domain-neutral examples, and TypeScript/React rules that exist only here. Keep the rules in sync, or delete one copy |
+| `architecture-review` | How to judge whether modules and dependencies fit the codebase: zero dependency cycles, and default layering for Next.js App Router apps |
+| `qa-playbook` | The manual QA method and the evidence format, with Next.js specifics (server actions, hydration errors, stale data) |
 | `quality-gate` | The gate script, `scripts/gate.py` (`/atdd:init` copies it into each repo as `scripts/atdd/gate.py`), plus what each check measures, how to read failures, per-stack setup and templates |
 | `init` | `/atdd:init` |
 
@@ -113,13 +113,14 @@ claude -p "/atdd:build PROJ-45" --permission-mode dontAsk --allowedTools "Workfl
 
 ## The quality gate in one paragraph
 
-Once `/atdd:init` has copied it into a repo, `python3 scripts/atdd/gate.py fast|full` judges only the change since the base commit (clean as you code). It covers:
+Once `/atdd:init` has copied it into a repo, `python3 scripts/atdd/gate.py fast|full` judges the change since the base commit (clean as you code). It supports .NET, TypeScript, Next.js (React, Prisma, MySQL) and Python. It covers:
 
 - build and analyzer warnings;
 - format and lint;
 - tests and unbound Gherkin steps;
-- cyclomatic and cognitive complexity of changed functions;
-- diff coverage;
+- cyclomatic, cognitive and NPath complexity of changed functions;
+- dependency cycles between namespaces or projects, anywhere in the code base: there must be none;
+- coverage of changed lines and of their branches (100% of each by default);
 - mutation score on changed lines;
 - new duplication;
 - architecture rules;
@@ -130,13 +131,14 @@ Once `/atdd:init` has copied it into a repo, `python3 scripts/atdd/gate.py fast|
 
 It guards against silent passes: missing tools, zero mutants, unmeasured coverage and crashed checks all fail or say why they were skipped. Details are in `skills/quality-gate/SKILL.md`.
 
-The TypeScript and Python paths were run end-to-end against sample repos while this plugin was built. The .NET path follows current docs and tool source but hasn't run against a real solution yet. Check `.atdd/quality/latest/logs/` after the first run.
+The TypeScript, Next.js and Python paths were run end-to-end against sample repos while this plugin was built, the Next.js one against MySQL 8 (Prisma's migration engine was replaced by a stand-in there). The .NET NPath and cycle checks ran against a sample solution on SDK 8 and 10; the rest of the .NET path follows current docs and tool source but hasn't run against a real solution with NuGet packages yet. Check `.atdd/quality/latest/logs/` after the first run.
 
 ## Where things go in a repo
 
 ```text
 .claude/atdd.json                    config (locked)
-scripts/atdd/gate.py, qa-*.sh        gate and QA scripts, copied in by /atdd:init (locked)
+scripts/atdd/gate.py, qa-*.sh        gate and QA scripts, copied in by /atdd:init (locked), with the stack's
+                                     gate helpers (TypeScript/Next.js: coverage and ESLint scripts; .NET: dotnet-quality/)
 <featuresDir>/<key>/requirements.md  ledger (locked once approved)
 <featuresDir>/<key>/*.feature        scenarios (locked once approved)
 .atdd/                               working area, git-ignored: spec snapshots, review notes, QA evidence, gate reports, logs

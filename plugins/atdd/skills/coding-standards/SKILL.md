@@ -1,6 +1,6 @@
 ---
 name: coding-standards
-description: Non-negotiable clean-code standards (plus C#-specific rules) that the atdd implementer writes to and the atdd reviewer judges against. Use whenever writing, reviewing or refactoring code in the ATDD pipeline. It enforces lean, intentional, readable code with no narration comments, no defensive bloat and no speculative abstraction.
+description: Non-negotiable clean-code standards (plus C#- and TypeScript/React-specific rules) that the atdd implementer writes to and the atdd reviewer judges against. Use whenever writing, reviewing or refactoring code in the ATDD pipeline. It enforces lean, intentional, readable code with no narration comments, no defensive bloat and no speculative abstraction.
 ---
 
 # Clean Code
@@ -279,3 +279,13 @@ Point at the specific line, state the principle it violates, and show the fixed 
 These apply on top of everything above when the code is C#.
 
 - Depend on the narrowest interface that works, but, make sure you do not increase the number of iterations by switching List to IEnumerable, and forcing methods to call .ToList on the IEnumerable.
+
+## TypeScript and React
+
+These apply on top of everything above when the code is TypeScript or JavaScript.
+
+- The types tell the truth. No `any`, and in production code no `as` casts or non-null `!` to quiet the compiler. Model the absent case (`| null`, a discriminated union) and handle it where it can occur.
+- Parse, don't validate: untrusted input (form data, request bodies, route and search params, environment variables) goes through one schema at the boundary, and only typed values travel inward.
+- Compute during render. Don't copy props or derived values into state, and don't use `useEffect` to keep them in sync; effects are for synchronizing with systems outside React.
+- List keys are the item's identity, never its index in a list that can change.
+- Let errors reach the route's error boundary (`error.tsx`) or a caller that can act on them. A component that catches an error and renders nothing hides the failure.
