@@ -37,7 +37,9 @@ def state():
     config = git("config", "--get-regexp", r"^branch\..*\.atdd", check=False)
     remote = subprocess.run(["git", "--git-dir", str(fixture / "origin.git"), "for-each-ref",
                              "--format=%(refname) %(objectname)"], capture_output=True, text=True).stdout
-    return {"refs": refs, "config": config, "origin": remote, "gh": calls_file.read_text() if calls_file.exists() else ""}
+    calls = calls_file.read_text().splitlines() if calls_file.exists() else []
+    writes = [c for c in calls if '"args": ["pr", "create"' in c]  # reads such as gh auth status don't count
+    return {"refs": refs, "config": config, "origin": remote, "gh pull requests": writes}
 
 
 if "--unchanged-since" in sys.argv:

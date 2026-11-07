@@ -57,6 +57,8 @@ The repo's `.claude/atdd.json` → `commands.coverGate` is the gate. When it isn
    - **No scenario could ever reach it**, such as dead code or a defensive branch: a **minor** with `audience: human`, as information.
 
    Group gaps by behavior, not by line: ten survivors in one untested branch are one finding.
+
+   In a unit of `/atdd:cover-queue` the branch holds only some of the area's `.feature` files. A gap in code that implements one of the ledger's requirements this unit's scenarios don't tag belongs to another unit of the area: it's neither the coverer's to fix nor a spec gap. Leave it out, or mention it once as a nit.
 5. **Watch for silent passes.** A check that "passed" while measuring nothing has failed:
    - zero mutants;
    - no target lines measured;

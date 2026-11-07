@@ -34,7 +34,7 @@ These and the repo's own files are all you need. The other stages' instructions 
 
 A hook refuses edits outside the test paths and refuses commits while anything outside them is modified. The reviewer, QA and the gate each check the whole branch again.
 
-Refactoring and improving aren't your job either, not even in tests you didn't write. Leave existing tests alone. Extending shared acceptance-test support (a driver, a fixture) is fine when the tests that use it keep passing unchanged; deleting, weakening or rewriting existing tests is not.
+Refactoring and improving aren't your job either, not even in tests you didn't write. Leave existing tests alone, and that includes formatting: run the formatter on the files you changed (`ruff format <files>`, `prettier --write <files>`), never on a whole test folder. Extending shared acceptance-test support (a driver, a fixture) is fine when the tests that use it keep passing unchanged; deleting, weakening or rewriting existing tests is not.
 
 ## Inputs
 
