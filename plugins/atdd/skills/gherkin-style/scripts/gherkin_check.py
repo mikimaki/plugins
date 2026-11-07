@@ -2,9 +2,15 @@
 """Deterministic checks for one issue's Gherkin: requirement coverage and scenario structure.
 
 Usage:
-    gherkin_check.py <feature-dir> [--ledger PATH] [--glossary PATH] [--json] [--max-steps N] [--strict]
+    gherkin_check.py <feature-dir> [--files F ...] [--ref REF] [--ledger PATH] [--glossary PATH] [--json]
+                     [--max-steps N] [--strict]
 
 <feature-dir> holds requirements.md (the requirements ledger) and the issue's .feature files.
+--files checks only the named .feature files (names inside <feature-dir>, or paths): full structure checks on them,
+and every requirement tag they use must exist in the ledger. Requirements that none of them covers are reported as
+information, not as errors, because the area's other files cover them (/atdd:cover-queue covers one file at a time).
+--ref reads everything from a git commit, branch or tag of the repo in the current directory instead of the working
+tree; <feature-dir> and the other paths are then relative to the repo root.
 The glossary defaults to docs.glossary in the repo's .claude/atdd.json, else GLOSSARY.md at the repo root.
 UI words that are part of a glossary term (a domain noun that happens to contain "card" or "page") aren't flagged.
 Exit codes: 0 no errors (warnings allowed unless --strict), 1 errors found, 2 usage or I/O problem.
@@ -16,9 +22,10 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import subprocess
 import sys
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 REQ_LINE = re.compile(r"^\s*[-*]\s*\**(R\d+)\**\s*[:.–—-]\s*(.+?)\s*$")
 REQ_TAG = re.compile(r"^@R\d+$")
@@ -114,6 +121,67 @@ class Report:
         return sum(1 for i in self.issues if i.level == level)
 
 
+class Disk:
+    """Reads the feature directory from the working tree."""
+
+    def is_dir(self, path: Path) -> bool:
+        return path.is_dir()
+
+    def is_file(self, path: Path) -> bool:
+        return path.is_file()
+
+    def read(self, path: Path) -> str:
+        return path.read_text(encoding="utf-8")
+
+    def features(self, directory: Path) -> list:
+        return sorted(directory.rglob("*.feature"))
+
+    def repo_root(self, start: Path) -> Path | None:
+        for directory in [start.resolve(), *start.resolve().parents]:
+            if (directory / ".claude" / "atdd.json").is_file() or (directory / ".git").exists():
+                return directory
+        return None
+
+
+class GitRef:
+    """Reads the feature directory from a git commit, branch or tag, never from the working tree. Paths are
+    relative to the repo root."""
+
+    def __init__(self, ref: str, cwd: Path) -> None:
+        self.ref = ref
+        self.cwd = cwd
+
+    def _git(self, *args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(["git", "-C", str(self.cwd), *args], capture_output=True, text=True)
+
+    def _spec(self, path: Path) -> str:
+        return f"{self.ref}:{PurePosixPath(path.as_posix())}".rstrip("/")
+
+    def valid(self) -> bool:
+        return self._git("rev-parse", "--verify", "--quiet", f"{self.ref}^{{commit}}").returncode == 0
+
+    def is_dir(self, path: Path) -> bool:
+        result = self._git("cat-file", "-t", self._spec(path))
+        return result.returncode == 0 and result.stdout.strip() == "tree"
+
+    def is_file(self, path: Path) -> bool:
+        result = self._git("cat-file", "-t", self._spec(path))
+        return result.returncode == 0 and result.stdout.strip() == "blob"
+
+    def read(self, path: Path) -> str:
+        result = self._git("show", self._spec(path))
+        if result.returncode != 0:
+            raise OSError(result.stderr.strip() or f"{self._spec(path)} doesn't exist")
+        return result.stdout
+
+    def features(self, directory: Path) -> list:
+        listing = self._git("ls-tree", "-r", "--name-only", self.ref, "--", directory.as_posix().rstrip("/") + "/")
+        return sorted(Path(p) for p in listing.stdout.splitlines() if p.endswith(".feature"))
+
+    def repo_root(self, start: Path) -> Path | None:
+        return Path(".")
+
+
 def split_cells(line: str) -> list:
     body = line.strip()
     if body.startswith("|"):
@@ -136,7 +204,7 @@ def split_cells(line: str) -> list:
     return cells
 
 
-def parse_feature(path: Path, rel: str, report: Report) -> Feature | None:
+def parse_feature(path: Path, text: str, rel: str, report: Report) -> Feature | None:
     feature = Feature(path=path)
     pending_tags: list = []
     rule_tags: list = []
@@ -147,7 +215,7 @@ def parse_feature(path: Path, rel: str, report: Report) -> Feature | None:
     in_docstring = None
     seen_feature = False
 
-    for number, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+    for number, raw in enumerate(text.splitlines(), start=1):
         stripped = raw.strip()
 
         if in_docstring:
@@ -279,18 +347,18 @@ def parse_feature(path: Path, rel: str, report: Report) -> Feature | None:
         # Otherwise it's a description line under Feature/Rule/Scenario/Examples, which Gherkin allows.
 
     if in_docstring:
-        report.error("unclosed-docstring", rel, len(path.read_text(encoding="utf-8").splitlines()), "Doc string is never closed.")
+        report.error("unclosed-docstring", rel, len(text.splitlines()), "Doc string is never closed.")
     if not seen_feature:
         report.error("no-feature", rel, 1, "File has no 'Feature:' line.")
         return None
     return feature
 
 
-def parse_ledger(path: Path, report: Report, rel: str) -> tuple[dict, list]:
+def parse_ledger(text: str, report: Report, rel: str) -> tuple[dict, list]:
     requirements: dict = {}
     open_questions: list = []
     section = None
-    for number, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+    for number, raw in enumerate(text.splitlines(), start=1):
         heading = HEADING.match(raw)
         if heading:
             title = heading.group(1).lower()
@@ -435,23 +503,23 @@ def requirement_tags(scenario: Scenario) -> dict:
     return tags
 
 
-def find_glossary(feature_dir: Path) -> Path | None:
+def find_glossary(feature_dir: Path, source) -> Path | None:
     """The glossary named in the repo's .claude/atdd.json, else GLOSSARY.md at the repo root."""
-    for directory in [feature_dir.resolve(), *feature_dir.resolve().parents]:
-        config = directory / ".claude" / "atdd.json"
-        if config.is_file() or (directory / ".git").exists():
-            docs = json.loads(config.read_text(encoding="utf-8")).get("docs", {}) if config.is_file() else {}
-            glossary = directory / (docs.get("glossary") or "GLOSSARY.md")
-            return glossary if glossary.is_file() else None
-    return None
+    root = source.repo_root(feature_dir)
+    if root is None:
+        return None
+    config = root / ".claude" / "atdd.json"
+    docs = json.loads(source.read(config)).get("docs", {}) if source.is_file(config) else {}
+    glossary = root / (docs.get("glossary") or "GLOSSARY.md")
+    return glossary if source.is_file(glossary) else None
 
 
-def domain_terms_pattern(glossary: Path | None) -> re.Pattern | None:
+def domain_terms_pattern(glossary: Path | None, source) -> re.Pattern | None:
     """Glossary terms that contain a UI or transport word, as one pattern that also matches their plurals."""
     if not glossary:
         return None
     terms = set()
-    for match in GLOSSARY_TERM.finditer(glossary.read_text(encoding="utf-8")):
+    for match in GLOSSARY_TERM.finditer(source.read(glossary)):
         term = next(group for group in match.groups() if group).strip().strip(":").strip()
         if term and UI_OR_TECH_WORDS.search(term.lower()):
             terms.add(term.lower())
@@ -461,10 +529,29 @@ def domain_terms_pattern(glossary: Path | None) -> re.Pattern | None:
     return re.compile(r"\b(?:" + "|".join(alternatives) + r")\b", re.IGNORECASE)
 
 
-def run(feature_dir: Path, ledger_path: Path, max_steps: int, glossary: Path | None) -> dict:
+def selected_files(feature_dir: Path, names: list, source) -> tuple[list, list]:
+    """Resolve --files: a name inside <feature-dir>, or a path. Returns (paths, problems)."""
+    paths, problems = [], []
+    for name in names:
+        candidates = [feature_dir / name, Path(name)]
+        path = next((c for c in candidates if source.is_file(c)), None)
+        if path is None:
+            problems.append(f"{name}: no such file in {feature_dir}")
+        elif path.suffix != ".feature":
+            problems.append(f"{name}: not a .feature file")
+        elif not path.resolve().is_relative_to(feature_dir.resolve()):
+            problems.append(f"{name}: outside {feature_dir}, so its ledger isn't {feature_dir}/requirements.md")
+        else:
+            paths.append(path)
+    return sorted(set(paths)), problems
+
+
+def run(feature_dir: Path, ledger_path: Path, max_steps: int, glossary: Path | None, source=None,
+        selection: list | None = None) -> dict:
+    source = source or Disk()
     report = Report()
     root = feature_dir.parent
-    domain_terms = domain_terms_pattern(glossary)
+    domain_terms = domain_terms_pattern(glossary, source)
 
     def rel(p: Path) -> str:
         try:
@@ -473,27 +560,29 @@ def run(feature_dir: Path, ledger_path: Path, max_steps: int, glossary: Path | N
             return str(p)
 
     requirements, open_questions = {}, []
-    if not ledger_path.exists():
+    if not source.is_file(ledger_path):
         report.error("missing-ledger", rel(ledger_path), 0,
                      "No requirements ledger; write requirements.md with one '- R<n>: <behavior>' line per requirement.")
     else:
-        requirements, open_questions = parse_ledger(ledger_path, report, rel(ledger_path))
+        requirements, open_questions = parse_ledger(source.read(ledger_path), report, rel(ledger_path))
         if not requirements:
             report.error("empty-ledger", rel(ledger_path), 0, "The ledger lists no '- R<n>: ...' requirements.")
 
-    files = sorted(feature_dir.rglob("*.feature"))
+    files = selection if selection is not None else source.features(feature_dir)
     if not files:
         report.error("no-feature-files", rel(feature_dir), 0, "No .feature files found.")
 
     names: dict = {}
     coverage: dict = {rid: [] for rid in requirements}
+    file_requirements: dict = {}
     scenario_count = 0
     for path in files:
         relative = rel(path)
-        feature = parse_feature(path, relative, report)
+        feature = parse_feature(path, source.read(path), relative, report)
         if not feature:
             continue
         check_structure(feature, relative, report, max_steps, names, domain_terms)
+        traced = file_requirements.setdefault(relative, set())
         for scenario in feature.scenarios:
             if scenario.kind == "background":
                 continue
@@ -504,20 +593,23 @@ def run(feature_dir: Path, ledger_path: Path, max_steps: int, glossary: Path | N
                              f"'{scenario.name}' has no @R tag. Tag the requirement it verifies, or drop it if no requirement asks for it.")
             for tag in tags:
                 rid = tag[1:]
+                traced.add(rid)
                 if requirements and rid not in requirements:
                     report.error("unknown-requirement", relative, scenario.line,
                                  f"'{scenario.name}' is tagged {tag}, which isn't in the ledger.")
                 elif rid in coverage:
                     coverage[rid].append(f"{relative}:{scenario.line} {scenario.name}")
 
-    for rid, hits in coverage.items():
-        if not hits:
+    uncovered = [rid for rid, hits in coverage.items() if not hits]
+    if selection is None:
+        for rid in uncovered:
             report.error("uncovered-requirement", rel(ledger_path), requirements[rid]["line"],
                          f"{rid} ({requirements[rid]['text']}) has no scenario tagged @{rid}.")
 
     covered = sum(1 for hits in coverage.values() if hits)
-    return {
+    result = {
         "featureDir": str(feature_dir),
+        "ref": getattr(source, "ref", None),
         "glossary": str(glossary) if glossary else None,
         "ledger": {"path": str(ledger_path), "requirements": list(requirements), "openQuestions": open_questions},
         "files": [rel(p) for p in files],
@@ -531,8 +623,19 @@ def run(feature_dir: Path, ledger_path: Path, max_steps: int, glossary: Path | N
             "warnings": report.count("warning"),
         },
         "coverage": coverage,
+        "fileRequirements": {path: sorted(rids, key=requirement_order) for path, rids in file_requirements.items()},
         "issues": [vars(i) for i in sorted(report.issues, key=lambda i: (i.level != "error", i.file, i.line))],
     }
+    if selection is not None:
+        # Information, not errors: the area's other .feature files cover these.
+        result["selection"] = {"files": [rel(p) for p in files],
+                               "uncoveredRequirements": sorted(uncovered, key=requirement_order)}
+    return result
+
+
+def requirement_order(rid: str) -> tuple:
+    digits = re.sub(r"\D", "", rid)
+    return (int(digits) if digits else 0, rid)
 
 
 def print_human(result: dict) -> None:
@@ -545,13 +648,22 @@ def print_human(result: dict) -> None:
                 print(f"  {location} [{i['code']}] {i['message']}")
             print()
     s = result["summary"]
-    print(f"{s['files']} file(s), {s['scenarios']} scenario(s), {s['covered']}/{s['requirements']} requirement(s) covered, "
+    selection = result.get("selection")
+    if selection is not None and selection["uncoveredRequirements"]:
+        print(f"INFO: {len(selection['uncoveredRequirements'])} requirement(s) of the ledger are covered by none of the "
+              f"selected files (the area's other files cover them): {', '.join(selection['uncoveredRequirements'])}")
+        print()
+    scope = "by the selected file(s)" if selection is not None else "covered"
+    print(f"{s['files']} file(s), {s['scenarios']} scenario(s), {s['covered']}/{s['requirements']} requirement(s) {scope}, "
           f"{s['openQuestions']} open question(s), {s['errors']} error(s), {s['warnings']} warning(s)")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("feature_dir", type=Path)
+    parser.add_argument("--files", nargs="+", metavar="FILE",
+                        help="check only these .feature files; requirements none of them covers are information")
+    parser.add_argument("--ref", help="read from this git commit, branch or tag instead of the working tree")
     parser.add_argument("--ledger", type=Path, help="defaults to <feature-dir>/requirements.md")
     parser.add_argument("--glossary", type=Path, help="defaults to docs.glossary in .claude/atdd.json, else GLOSSARY.md")
     parser.add_argument("--json", action="store_true", help="print the full result as JSON")
@@ -559,14 +671,27 @@ def main() -> int:
     parser.add_argument("--strict", action="store_true", help="fail on warnings too")
     args = parser.parse_args()
 
-    if not args.feature_dir.is_dir():
-        print(f"Not a directory: {args.feature_dir}", file=sys.stderr)
+    source = Disk()
+    if args.ref:
+        source = GitRef(args.ref, Path.cwd())
+        if not source.valid():
+            print(f"Not a commit, branch or tag in this repo: {args.ref}", file=sys.stderr)
+            return 2
+    if not source.is_dir(args.feature_dir):
+        print(f"Not a directory{' in ' + args.ref if args.ref else ''}: {args.feature_dir}", file=sys.stderr)
         return 2
-    if args.glossary and not args.glossary.is_file():
+    if args.glossary and not source.is_file(args.glossary):
         print(f"Not a file: {args.glossary}", file=sys.stderr)
         return 2
-    glossary = args.glossary or find_glossary(args.feature_dir)
-    result = run(args.feature_dir, args.ledger or args.feature_dir / "requirements.md", args.max_steps, glossary)
+    selection = None
+    if args.files:
+        selection, problems = selected_files(args.feature_dir, args.files, source)
+        if problems:
+            print("\n".join(problems), file=sys.stderr)
+            return 2
+    glossary = args.glossary or find_glossary(args.feature_dir, source)
+    result = run(args.feature_dir, args.ledger or args.feature_dir / "requirements.md", args.max_steps, glossary,
+                 source, selection)
     if args.json:
         print(json.dumps(result, indent=2))
     else:

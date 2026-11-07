@@ -3,13 +3,16 @@
 
     atdd_guard.py edit   # Edit / Write / NotebookEdit
     atdd_guard.py git    # Bash commands that invoke git
+    atdd_guard.py gh     # Bash commands that invoke the GitHub CLI
 
 Does nothing for the main session, for other agents, and in repos without .claude/atdd.json.
 For atdd agents it enforces who may write where and which git commands they may run, and
 it gates the implementer's commits on locked files and the repo's fast checks. The
 acceptance-test-coverer (/atdd:cover) writes only inside the test paths, and its commits are
 gated on locked files, on nothing outside the test paths having changed, and on the cover
-fast checks.
+fast checks. The preparer commits only test paths, and pushes only the unit branches
+/atdd:cover-queue created, never the base or integration branch, and never by force. Only the
+preparer may open a pull request; every other gh command an atdd agent runs must only read.
 """
 
 from __future__ import annotations
@@ -35,7 +38,7 @@ DEFAULT_COVER_FAST_CHECKS = "python3 scripts/atdd/gate.py cover-fast"
 GIT_READ_COMMANDS = {
     "status", "diff", "log", "show", "blame", "rev-parse", "ls-files", "grep", "merge-base", "describe",
     "shortlog", "cat-file", "ls-tree", "name-rev", "check-ignore", "rev-list", "for-each-ref", "show-ref",
-    "reflog", "help", "version", "count-objects", "var", "whatchanged", "range-diff", "annotate",
+    "reflog", "help", "version", "count-objects", "var", "whatchanged", "range-diff", "annotate", "ls-remote",
 }
 GIT_GLOBAL_OPTS_WITH_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env"}
 COMMITTER_FORBIDDEN = {
@@ -51,6 +54,13 @@ COMMITTER_FORBIDDEN = {
 }
 BRANCH_WRITE_FLAGS = {"-d", "-D", "-m", "-M", "-c", "-C", "-f", "--force", "--delete", "--move", "--copy",
                       "-u", "--set-upstream-to", "--unset-upstream", "--edit-description"}
+PUSH_FORBIDDEN_FLAGS = {"-f", "--force", "--force-with-lease", "--force-if-includes", "-d", "--delete", "--mirror",
+                        "--all", "--branches", "--tags", "--prune", "--follow-tags", "-o", "--push-option"}
+COMMIT_OPTIONS_WITH_VALUE = {"-m", "--message", "-F", "--file", "-C", "--reuse-message", "-c", "--reedit-message",
+                             "--author", "--date", "--fixup", "--squash", "--cleanup", "-t", "--template", "--trailer"}
+STACK_KEY = re.compile(r"^branch\..+\.atdd[A-Za-z]+$")
+DEFAULT_INTEGRATION_BRANCH = "atdd/cover-base"
+GH_READ_VERBS = {"view", "list", "status", "diff", "checks"}
 FAST_CHECK_TIMEOUT_SECONDS = 1750
 SUMMARY_LINES = 40
 
@@ -274,18 +284,138 @@ def check_committer_git(agent: str, invocations: list[list[str]], root: Path, co
     return run_fast_checks(root, commands["fastChecks"])
 
 
-def check_preparer_git(invocations: list[list[str]], root: Path, config: dict) -> int:
+def in_features(path: str, config: dict) -> bool:
     features = str(config.get("featuresDir", "")).strip("/")
+    return bool(features) and (path == features or path.startswith(features + "/"))
+
+
+def preparer_may_commit(path: str, config: dict) -> bool:
+    """The feature directory (scenarios) and, when a cover-queue unit is parked, the test paths: never anything else."""
+    return in_features(path, config) or in_test_paths(path, config)
+
+
+def git_config_value(root: Path, key: str) -> str:
+    result = subprocess.run(["git", "-C", str(root), "config", "--get", key], capture_output=True, text=True)
+    return result.stdout.strip()
+
+
+def protected_branches(config: dict) -> set:
+    base = str(config.get("baseBranch") or "main")
+    integration = str((config.get("cover") or {}).get("integrationBranch") or DEFAULT_INTEGRATION_BRANCH)
+    return {base, integration, "main", "master"}
+
+
+def is_queue_unit_branch(root: Path, branch: str, config: dict) -> bool:
+    """A branch /atdd:cover-queue created: the preparer records its stack parent as branch.<name>.atddBase."""
+    return bool(branch) and branch not in protected_branches(config) and bool(git_config_value(root, f"branch.{branch}.atddBase"))
+
+
+def check_preparer_commit(rest: list, root: Path, config: dict) -> str | None:
+    if "--amend" in rest:
+        return "Don't amend: make a new commit."
+    pathspecs, i = [], 0
+    while i < len(rest):
+        arg = rest[i]
+        if arg == "--":
+            pathspecs += rest[i + 1:]
+            break
+        if arg in COMMIT_OPTIONS_WITH_VALUE:
+            i += 2
+            continue
+        if not arg.startswith("-"):
+            pathspecs.append(arg)
+        i += 1
+    candidates = set(git(root, "diff", "--cached", "--name-only").splitlines())
+    if any(flag in rest for flag in ("-a", "--all")) or any(re.fullmatch(r"-[A-Za-z]*a[A-Za-z]*", a) for a in rest if not a.startswith("--")):
+        candidates |= set(git(root, "diff", "--name-only").splitlines())
+    if pathspecs:
+        listed = git(root, "status", "--porcelain=v1", "--untracked-files=all", "--", *pathspecs).splitlines()
+        candidates |= {line[3:].split(" -> ")[-1] for line in listed if len(line) > 3}
+    outside = sorted(p for p in candidates if p and not preparer_may_commit(p, config))
+    if outside:
+        return ("The preparer only commits the feature directory and the test paths "
+                    f"({', '.join(cover_test_paths(config)) or 'none configured'}); leave these out:\n" + "\n".join(outside))
+    return None
+
+
+def check_preparer_checkout(rest: list, config: dict) -> str | None:
+    if "--" not in rest:
+        return ("Use git switch to change branches. The preparer uses git checkout only as "
+                    "`git checkout <ref> -- <paths>`, to bring scenario files in from the source ref.")
+    paths = rest[rest.index("--") + 1:]
+    options = [a for a in rest[:rest.index("--")] if a.startswith("-")]
+    outside = [p for p in paths if not in_features(p.rstrip("/"), config)]
+    if options or not paths or outside:
+        return ("git checkout <ref> -- <paths> may only bring in files inside the feature directory "
+                    f"({config.get('featuresDir', '')}/); the spec stays out of the branch." + (
+                        "\nOutside: " + ", ".join(outside) if outside else ""))
+    return None
+
+
+def check_preparer_branch(rest: list, config: dict) -> str | None:
+    names = [a for a in rest if not a.startswith("-")]
+    flags = [a for a in rest if a.startswith("-")]
+    if set(flags) - {"--no-track", "--track"} or not 1 <= len(names) <= 2:
+        return "The preparer only creates branches (git branch <name> <start>); it never renames, moves or deletes them."
+    if names[0] in protected_branches(config) - {str((config.get("cover") or {}).get("integrationBranch") or DEFAULT_INTEGRATION_BRANCH)}:
+        return f"{names[0]} is the base branch; the preparer doesn't create or move it."
+    return None
+
+
+def check_preparer_config(rest: list) -> str | None:
+    reading = {"--get", "--get-all", "--list", "-l", "--get-regexp"}
+    if rest[:1] and rest[0] in reading:
+        return None
+    args = [a for a in rest if a not in ("--unset", "--unset-all", "--local", "--replace-all")]
+    if args and STACK_KEY.match(args[0]) and len(args) <= 2:
+        return None
+    return "The preparer only sets branch.<branch>.atdd* keys (the queue's records of a unit branch) with git config."
+
+
+def check_preparer_push(rest: list, root: Path, config: dict) -> str | None:
+    flags = [a for a in rest if a.startswith("-")]
+    refs = [a for a in rest if not a.startswith("-")]
+    if set(flags) & PUSH_FORBIDDEN_FLAGS or set(flags) - {"-u", "--set-upstream", "-q", "--quiet", "--porcelain"}:
+        return "Push plainly: git push <remote> <unit-branch>. No force, deletes, tags or other options."
+    if len(refs) != 2 or any(ch in refs[1] for ch in ":+*^~") or refs[1] == "HEAD":
+        return "Push exactly one unit branch by name: git push <remote> <unit-branch>."
+    branch = refs[1][len("refs/heads/"):] if refs[1].startswith("refs/heads/") else refs[1]
+    if not is_queue_unit_branch(root, branch, config):
+        return (f"{branch} isn't a unit branch /atdd:cover-queue created (no branch.{branch}.atddBase), or it's the base "
+                    "or integration branch. The queue pushes only its own unit branches.")
+    return None
+
+
+def check_preparer_rebase(rest: list, root: Path, config: dict) -> str | None:
+    if rest == ["--abort"]:
+        return None
+    branch = git(root, "symbolic-ref", "--quiet", "--short", "HEAD").strip()
+    pushed = any(line.endswith("/" + branch) for line in git(root, "for-each-ref", "--format=%(refname)", "refs/remotes").splitlines())
+    simple = (len(rest) == 1 and not rest[0].startswith("-")) or (len(rest) == 3 and rest[0] == "--onto")
+    if not simple or not is_queue_unit_branch(root, branch, config) or pushed:
+        return ("The preparer rebases only a parked or interrupted unit branch that was never pushed, onto the top of "
+                    "the stack (git rebase <top>, or git rebase --onto <top> <old-parent>), and aborts on a conflict.")
+    return None
+
+
+def check_preparer_git(invocations: list[list[str]], root: Path, config: dict) -> int:
+    checks = {
+        "commit": lambda rest: check_preparer_commit(rest, root, config),
+        "checkout": lambda rest: check_preparer_checkout(rest, config),
+        "branch": lambda rest: check_preparer_branch(rest, config),
+        "config": check_preparer_config,
+        "push": lambda rest: check_preparer_push(rest, root, config),
+        "rebase": lambda rest: check_preparer_rebase(rest, root, config),
+        "fetch": lambda rest: "Fetch without refspecs that write local branches." if any(":" in a for a in rest) else None,
+    }
     for subcommand, *rest in invocations:
         if is_read_only_git(subcommand, rest) or subcommand in {"switch", "add"}:
             continue
-        if subcommand == "commit":
-            outside = [p for p in changed_paths(root) if not (features and p.startswith(features + "/"))]
-            staged = [p for p in git(root, "diff", "--cached", "--name-only").splitlines() if p in outside]
-            if staged:
-                return deny("The preparer only commits the feature directory; unstage these first:\n" + "\n".join(staged))
-            continue
-        return deny(f"git {subcommand} isn't part of the preparer's job.")
+        if subcommand not in checks:
+            return deny(f"git {subcommand} isn't part of the preparer's job.")
+        reason = checks[subcommand](rest)
+        if reason:
+            return deny(reason)
     return allow()
 
 
@@ -296,6 +426,8 @@ def is_read_only_git(subcommand: str, rest: list) -> bool:
         return not (set(rest) & BRANCH_WRITE_FLAGS) and (not rest or rest[0].startswith("-"))
     if subcommand == "worktree":
         return rest[:1] == ["list"]
+    if subcommand == "remote":
+        return not rest or rest[0] in ("-v", "--verbose", "get-url", "show")
     if subcommand == "config":
         return bool(rest[:1]) and rest[0] in ("--get", "--get-all", "--list", "-l")
     if subcommand == "stash":
@@ -324,6 +456,61 @@ def check_git(agent: str, data: dict, root: Path, config: dict) -> int:
     return allow()
 
 
+def gh_invocations(command: str) -> list[list[str]]:
+    """Return the arguments of every gh invocation in a shell command."""
+    invocations = []
+    for segment in re.split(r"\|\||&&|[;|&\n()`]|\$\(", command):
+        try:
+            tokens = shlex.split(segment)
+        except ValueError:
+            tokens = segment.split()
+        while tokens and (re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tokens[0]) or tokens[0] in {"env", "command", "time", "nohup", "exec"}):
+            tokens = tokens[1:]
+        if tokens and Path(tokens[0]).name == "gh":
+            invocations.append(tokens[1:])
+    return invocations
+
+
+def option_value(args: list, *names: str) -> str | None:
+    for i, arg in enumerate(args):
+        for name in names:
+            if arg == name and i + 1 < len(args):
+                return args[i + 1]
+            if name.startswith("--") and arg.startswith(name + "="):
+                return arg[len(name) + 1:]
+    return None
+
+
+def gh_denial(agent: str, args: list, root: Path, config: dict) -> str | None:
+    if not args or args[0] in ("--version", "version", "help", "--help"):
+        return None
+    group, verb = args[0], (args[1] if len(args) > 1 else "")
+    if (group, verb) == ("auth", "status") or group == "search" or verb in GH_READ_VERBS:
+        return None
+    if group == "api":
+        method = (option_value(args, "-X", "--method") or "GET").upper()
+        writes = method != "GET" or any(a in ("-f", "-F", "--field", "--raw-field", "--input") or
+                                        a.startswith(("--field=", "--raw-field=", "--input=")) for a in args)
+        return "atdd agents only read through gh api (GET without fields)." if writes else None
+    if agent == PREPARER and (group, verb) == ("pr", "create"):
+        head, base = option_value(args, "-H", "--head"), option_value(args, "-B", "--base")
+        if not head or not base:
+            return "Open a unit's pull request with both --base <stack parent> and --head <unit branch>."
+        if not is_queue_unit_branch(root, head, config):
+            return f"{head} isn't a unit branch /atdd:cover-queue created; the preparer opens pull requests only for those."
+        return None
+    return (f"gh {' '.join(args[:2])} would change something on GitHub. atdd agents only read there; the preparer may "
+            "open a unit's pull request with gh pr create.")
+
+
+def check_gh(agent: str, data: dict, root: Path, config: dict) -> int:
+    for args in gh_invocations((data.get("tool_input") or {}).get("command", "")):
+        reason = gh_denial(agent, args, root, config)
+        if reason:
+            return deny(reason)
+    return allow()
+
+
 def main() -> int:
     mode = sys.argv[1] if len(sys.argv) > 1 else ""
     data = json.load(sys.stdin)
@@ -340,6 +527,8 @@ def main() -> int:
         return check_edit(agent, data, root, config)
     if mode == "git":
         return check_git(agent, data, root, config)
+    if mode == "gh":
+        return check_gh(agent, data, root, config)
     return allow()
 
 

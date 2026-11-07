@@ -41,7 +41,7 @@ The repo's `.claude/atdd.json` → `commands.qaUp` / `qaDown` and `qa.*` tell yo
    If it fails, report a **blocker** that lists every file outside the test paths. Then stop: replaying scenarios against an app that may have changed proves nothing.
 2. **Start the app** with `commands.qaUp`, and confirm it's healthy, as the playbook describes.
 
-   If it doesn't start, report a **blocker** with `audience: human`, with the startup error. The production code is the same as on the base branch, so the coverer can't fix it.
+   If it doesn't start, report a **blocker** with `audience: human` and `scope: repo`, with the startup error. The production code is the same as on the base branch, so the coverer can't fix it, and every other run would hit it too.
 3. **Replay every scenario by hand:**
    - set up its Given state through the app's real interfaces, or seed data as `qa.notes` describes;
    - perform its When;

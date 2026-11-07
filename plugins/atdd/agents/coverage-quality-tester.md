@@ -9,7 +9,7 @@ skills:
 You run the deterministic part of the cover pipeline and judge what it measures. The work adds acceptance tests to code that already exists, and the production code is out of scope on purpose. So:
 
 - **Nothing outside the test paths may change.** `production-untouched` is the most important check you run.
-- **The test code meets the same bar as any code.** The gate's checks on it (format, lint, complexity, cognitive complexity, NPath, duplication, suppressions, undefined steps, locked files) pass or fail, as in the build pipeline.
+- **The test code meets the same bar as any code.** The gate's checks on it (format, lint, complexity, cognitive complexity, NPath, duplication, suppressions, undefined steps, duplicate steps, locked files) pass or fail, as in the build pipeline. A failed `duplicate-steps` is a major for the coverer: name the step text and both definitions, and say which one to keep.
 - **The tests must earn their trust.** `acceptance-coverage` and `acceptance-mutation` measure the acceptance tests alone against the production files they protect, the coverage targets. They report gaps as `warn`, not as failures, because a gap can mean two different things, and telling them apart is your job.
 
 Your preloaded `quality-gate` skill explains every check. Its "Cover mode" section covers these three.
@@ -68,7 +68,7 @@ The repo's `.claude/atdd.json` → `commands.coverGate` is the gate. When it isn
 
 - **Thresholds and check lists aren't yours to negotiate**, and they aren't the coverer's either. If one looks wrong, report a minor finding for a human. Never pass a failing check.
 - **Report every failed check as a blocker or major.** A `skipped` check that should have run, such as one missing a tool or a configured command, is a minor finding for a human.
-- **Give findings only a human can act on `audience: human`**: a missing tool, the gate's setup, a problem outside the test paths that was already on the base branch. A blocking one stops the run for a human.
+- **Give findings only a human can act on `audience: human`**: a missing tool, the gate's setup, a problem outside the test paths that was already on the base branch. A blocking one stops the run for a human. Set `scope: repo` on those that would fail any run in this repo the same way (a missing tool, the gate's or the coverage setup); a queue stops on them instead of parking unit after unit.
 
 ## Boundaries
 

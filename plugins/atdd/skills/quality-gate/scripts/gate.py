@@ -7,19 +7,21 @@
     python3 scripts/atdd/gate.py cover-fast   # /atdd:cover's commit gate: only test files changed, and they're sound
     python3 scripts/atdd/gate.py cover-full   # adds duplication, locked files, and the acceptance tests' own coverage and
                                               # mutation score on the production files they protect
+    python3 scripts/atdd/gate.py --version
 
 /atdd:init installs this script into each repo as scripts/atdd/gate.py, a locked file. Its source is
 skills/quality-gate/scripts/gate.py in the atdd plugin; to update a repo, copy that over and commit it.
 
 Configuration lives in .claude/atdd.json ("stack", "baseBranch", "featuresDir", "lockedPaths", "gate").
-Environment overrides: ATDD_BASE (diff base, default: merge-base with baseBranch), ATDD_OUT (report
+Environment overrides: ATDD_BASE (diff base, default: see resolve_base), ATDD_OUT (report
 directory, default .atdd/quality/latest), ATDD_SCENARIOS_COMMIT (commit holding the approved scenarios,
 for the locked-files check), ATDD_COVER_TARGETS (cover-full: a file listing, one per line, the production files the
 acceptance tests protect). Writes <out>/report.json plus one log per check; exits 1 if any check fails.
 
 The cover modes judge a change that adds acceptance tests to existing code and must leave everything else alone, so
 they measure the test code instead of production code, never look at architecture or dependency cycles, and fail when
-any file outside the test paths (cover.testPaths, else gate.testDirs plus featuresDir) differs from the base.
+any file outside the test paths (cover.testPaths, else gate.testDirs plus featuresDir) differs from the base, or
+when a step text has more than one step definition.
 
 Standard library only; Python 3.9+. The tools it drives (lizard, diff-cover, jscpd, Stryker, ...) are
 installed per repo, see the atdd quality-gate skill. Python NPath and Python import cycles are computed here
@@ -47,6 +49,7 @@ import xml.etree.ElementTree as ElementTree
 from dataclasses import dataclass, field
 from pathlib import Path
 
+GATE_VERSION = "0.4.0"
 JSCPD = "jscpd@5.4.2"
 
 DEFAULT_THRESHOLDS = {
@@ -64,8 +67,8 @@ FAST_CHECKS = ["build", "format", "lint", "tests", "undefined-steps", "complexit
                "dependency-cycles", "suppressions"]
 FULL_CHECKS = FAST_CHECKS + ["diff-coverage", "mutation", "duplication", "architecture", "dead-code",
                              "vulnerabilities", "locked-files"]
-COVER_FAST_CHECKS = ["production-untouched", "build", "format", "lint", "tests", "undefined-steps", "complexity",
-                     "cognitive", "npath", "suppressions"]
+COVER_FAST_CHECKS = ["production-untouched", "build", "format", "lint", "tests", "undefined-steps", "duplicate-steps",
+                     "complexity", "cognitive", "npath", "suppressions"]
 COVER_FULL_CHECKS = COVER_FAST_CHECKS + ["duplication", "locked-files", "acceptance-coverage", "acceptance-mutation"]
 # mode -> (the key in .claude/atdd.json "gate" that can replace its checks, its default checks)
 MODES = {
@@ -334,16 +337,71 @@ def git(root: Path, *args: str) -> str:
     return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, check=True).stdout
 
 
-def resolve_base(root: Path, config: dict, override: str | None) -> str:
+def git_ok(root: Path, *args: str) -> bool:
+    return subprocess.run(["git", "-C", str(root), *args], capture_output=True).returncode == 0
+
+
+def commit_of(root: Path, ref: str) -> str | None:
+    result = subprocess.run(["git", "-C", str(root), "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
+                            capture_output=True, text=True)
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def merge_base_with(root: Path, name: str) -> tuple:
+    """(merge-base of HEAD with branch `name`, note). Of the local branch and origin/<name>, uses the one that contains
+    the other, so a local branch that is behind origin doesn't count already-merged changes as part of this one."""
+    local, remote = commit_of(root, f"refs/heads/{name}"), commit_of(root, f"refs/remotes/origin/{name}")
+    if not local and not remote:
+        other = commit_of(root, name)  # a commit, tag or other ref
+        return (git(root, "merge-base", other, "HEAD").strip(), "") if other else (None, "")
+    if not (local and remote) or local == remote:
+        return git(root, "merge-base", local or remote, "HEAD").strip(), ""
+    if git_ok(root, "merge-base", "--is-ancestor", local, remote):
+        return git(root, "merge-base", remote, "HEAD").strip(), f"{name} is behind origin/{name}, so the base comes from origin/{name}."
+    if git_ok(root, "merge-base", "--is-ancestor", remote, local):
+        return git(root, "merge-base", local, "HEAD").strip(), f"{name} is ahead of origin/{name}, so the base comes from {name}."
+    from_local, from_remote = git(root, "merge-base", local, "HEAD").strip(), git(root, "merge-base", remote, "HEAD").strip()
+    newer = from_remote if git_ok(root, "merge-base", "--is-ancestor", from_local, from_remote) else from_local
+    return newer, (f"{name} and origin/{name} have diverged; the base is the later of their merge-bases with HEAD, "
+                   f"{newer[:10]}.")
+
+
+def current_branch(root: Path) -> str:
+    result = subprocess.run(["git", "-C", str(root), "symbolic-ref", "--quiet", "--short", "HEAD"], capture_output=True, text=True)
+    return result.stdout.strip()
+
+
+def stack_parent(root: Path) -> str:
+    """The branch a /atdd:cover-queue unit branch was cut from, recorded by the preparer as branch.<name>.atddBase."""
+    branch = current_branch(root)
+    if not branch:
+        return ""
+    result = subprocess.run(["git", "-C", str(root), "config", "--get", f"branch.{branch}.atddBase"], capture_output=True, text=True)
+    return result.stdout.strip()
+
+
+def resolve_base(root: Path, config: dict, override: str | None) -> tuple:
+    """(base commit, note). ATDD_BASE wins. A /atdd:cover-queue unit branch is judged against its stack parent (then
+    the integration branch, once the parent is merged and deleted), so the gate sees exactly that unit's change.
+    Everything else uses the merge-base with baseBranch."""
     if override:
-        return git(root, "rev-parse", override).strip()
+        return git(root, "rev-parse", override).strip(), ""
     branch = config.get("baseBranch", "main")
-    for ref in (branch, f"origin/{branch}"):
-        try:
-            return git(root, "merge-base", ref, "HEAD").strip()
-        except subprocess.CalledProcessError:
-            continue
-    raise SystemExit(f"Can't find the merge-base with '{branch}' or 'origin/{branch}'. Set ATDD_BASE or baseBranch in .claude/atdd.json.")
+    candidates = [branch]
+    parent = stack_parent(root)
+    if parent:
+        integration = str((config.get("cover") or {}).get("integrationBranch") or "atdd/cover-base")
+        candidates = [parent, integration, branch]
+    skipped = []
+    for name in dict.fromkeys(candidates):
+        base, note = merge_base_with(root, name)
+        if base:
+            if parent and name != parent:
+                note = " ".join(filter(None, [f"The stack parent {parent} no longer exists; the base comes from {name}.", note]))
+            return base, note
+        skipped.append(name)
+    raise SystemExit(f"Can't find the merge-base with any of: {', '.join(skipped)} (local or origin/). Set ATDD_BASE or "
+                     "baseBranch in .claude/atdd.json.")
 
 
 def changed_files(root: Path, base: str) -> list:
@@ -654,6 +712,192 @@ def check_undefined_steps(g: Gate, r: Result) -> None:
     else:
         r.detail = (f"Scenarios are bound with scenarios() in {', '.join(g.rel(p) for p in binders)}; a missing step "
                     "fails the tests check with StepDefinitionNotFoundError.")
+
+
+@dataclass
+class StepDefinition:
+    location: str
+    keywords: tuple       # the step keywords it binds; node runners ignore keywords
+    kind: str             # exact | parse | cfparse | re | regex
+    text: str
+
+    def key(self, keyword_agnostic: bool) -> tuple:
+        return (("*",) if keyword_agnostic else self.keywords, self.kind, self.text)
+
+
+PYTHON_STEP_DECORATORS = {"given": ("given",), "when": ("when",), "then": ("then",), "step": ("given", "when", "then")}
+NODE_STEP = re.compile(r"""\b(Given|When|Then|Step|defineStep)\s*\(\s*(?:(['"`])((?:\\.|(?!\2)[^\\])*)\2|/((?:\\.|[^/\\\n])+)/[a-z]*)""")
+DOTNET_STEP = re.compile(r'\[\s*(?:Reqnroll\.|TechTalk\.SpecFlow\.)?(Given|When|Then|StepDefinition)(?:Attribute)?\s*\(\s*(@?)"((?:""|\\.|[^"\\])*)"')
+FEATURE_STEP = re.compile(r"^\s*(Given|When|Then|And|But|\*)\s+(.+?)\s*$")
+
+
+def step_definitions(g: Gate) -> list:
+    """Every step definition in the test paths, changed or not: a duplicate is between a new and an existing one."""
+    listed = git(g.root, "ls-files", "-co", "--exclude-standard").splitlines()
+    files = sorted(p for p in set(listed) if p.endswith(g.profile["extensions"]) and g.in_test_paths(p)
+                   and not g.is_generated(p) and (g.root / p).is_file())
+    found = []
+    for path in files:
+        text = (g.root / path).read_text(encoding="utf-8", errors="replace")
+        if g.stack == "python":
+            found += python_step_definitions(path, text)
+        elif g.node:
+            for match in NODE_STEP.finditer(text):
+                literal, regex = match.group(3), match.group(4)
+                if literal is not None and "${" in literal:
+                    continue
+                line = text.count("\n", 0, match.start()) + 1
+                found.append(StepDefinition(f"{path}:{line}", ("*",), "regex" if regex else "exact",
+                                            regex if regex else literal))
+        else:
+            for match in DOTNET_STEP.finditer(text):
+                word = match.group(1).lower()
+                keywords = ("given", "when", "then") if word == "stepdefinition" else (word,)
+                raw = match.group(3).replace('""', '"') if match.group(2) else match.group(3)
+                line = text.count("\n", 0, match.start()) + 1
+                found += [StepDefinition(f"{path}:{line}", (k,), "regex", raw) for k in keywords]
+    return found
+
+
+def python_step_definitions(path: str, text: str) -> list:
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return []
+    found = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for decorator in node.decorator_list:
+            if not isinstance(decorator, ast.Call) or not decorator.args:
+                continue
+            func = decorator.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+            if name not in PYTHON_STEP_DECORATORS:
+                continue
+            argument = decorator.args[0]
+            kind, pattern = "exact", None
+            if isinstance(argument, ast.Constant) and isinstance(argument.value, str):
+                pattern = argument.value
+            elif isinstance(argument, ast.Call) and argument.args and isinstance(argument.args[0], ast.Constant):
+                parser = argument.func.attr if isinstance(argument.func, ast.Attribute) else getattr(argument.func, "id", "")
+                kind = parser if parser in ("parse", "cfparse", "re") else "parse"
+                pattern = argument.args[0].value if isinstance(argument.args[0].value, str) else None
+            if pattern is not None:
+                found += [StepDefinition(f"{path}:{decorator.lineno}", (k,), kind, pattern)
+                          for k in PYTHON_STEP_DECORATORS[name]]
+    return found
+
+
+def parse_format_regex(pattern: str) -> re.Pattern:
+    """A regex for a parse/cfparse format: literal text, with each {field} matching anything."""
+    pieces, i = [], 0
+    while i < len(pattern):
+        if pattern.startswith("{{", i) or pattern.startswith("}}", i):
+            pieces.append(re.escape(pattern[i]))
+            i += 2
+        elif pattern[i] == "{":
+            end = pattern.find("}", i)
+            if end < 0:
+                pieces.append(re.escape(pattern[i:]))
+                break
+            pieces.append("(.+?)")
+            i = end + 1
+        else:
+            pieces.append(re.escape(pattern[i]))
+            i += 1
+    return re.compile("".join(pieces), re.DOTALL)
+
+
+def python_step_matches(definition: StepDefinition, text: str) -> bool:
+    if definition.kind == "exact":
+        return definition.text == text
+    try:
+        regex = re.compile(definition.text) if definition.kind == "re" else parse_format_regex(definition.text)
+    except re.error:
+        return False
+    return regex.fullmatch(text) is not None
+
+
+def feature_steps(g: Gate) -> list:
+    """(keyword, text, location) for every step in the working tree's .feature files, outlines expanded."""
+    features = str(g.config.get("featuresDir", "features")).strip("/") or "."
+    steps = []
+    for path in sorted((g.root / features).rglob("*.feature")) if (g.root / features).is_dir() else []:
+        rel = g.rel(path)
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        current, outline, examples = "given", [], None
+        pending = []
+
+        def flush():
+            for keyword, text, location in pending:
+                rows = examples or [{}]
+                for row in rows:
+                    expanded = re.sub(r"<([^<>]+)>", lambda m: row.get(m.group(1), m.group(0)), text)
+                    steps.append((keyword, expanded, location))
+            pending.clear()
+
+        header = None
+        for number, raw in enumerate(lines, start=1):
+            stripped = raw.strip()
+            if re.match(r"^(Scenario|Scenario Outline|Scenario Template|Example|Background|Rule|Feature):", stripped):
+                flush()
+                examples, header, current = None, None, "given"
+                continue
+            if re.match(r"^(Examples|Scenarios):", stripped):
+                examples, header = [], None
+                continue
+            if examples is not None and stripped.startswith("|"):
+                cells = [c.strip() for c in stripped.strip("|").split("|")]
+                if header is None:
+                    header = cells
+                else:
+                    examples.append(dict(zip(header, cells)))
+                continue
+            match = FEATURE_STEP.match(raw)
+            if match and examples is None:
+                word = match.group(1).lower()
+                current = current if word in ("and", "but", "*") else word
+                pending.append((current, match.group(2), f"{rel}:{number}"))
+        flush()
+    return steps
+
+
+def check_duplicate_steps(g: Gate, r: Result) -> None:
+    r.threshold = "each step text has exactly one definition"
+    definitions = step_definitions(g)
+    if not definitions:
+        r.status, r.detail = "skipped", "No step definitions in the test paths."
+        return
+    agnostic = g.node  # Cucumber and playwright-bdd match a definition whatever keyword the step uses
+    groups = {}
+    for definition in definitions:
+        groups.setdefault(definition.key(agnostic), []).append(definition.location)
+    duplicates = [f"{text!r} ({kind}{'' if agnostic else ', ' + '/'.join(keywords)}) is defined {len(locations)} times: "
+                  + ", ".join(sorted(set(locations)))
+                  for (keywords, kind, text), locations in sorted(groups.items()) if len(set(locations)) > 1]
+    ambiguous = []
+    if g.stack == "python":
+        # pytest-bdd doesn't fail when two definitions match a step: the one registered last wins, silently.
+        seen = set()
+        for keyword, text, location in feature_steps(g):
+            matching = sorted({d.location for d in definitions if keyword in d.keywords and python_step_matches(d, text)})
+            if len(matching) > 1 and (keyword, text) not in seen:
+                seen.add((keyword, text))
+                ambiguous.append(f"{location} {keyword.capitalize()} {text!r} matches {len(matching)} definitions: "
+                                 + ", ".join(matching))
+    log = g.log_path("duplicate-steps")
+    log.write_text("".join(f"{d.location}\t{'/'.join(d.keywords)}\t{d.kind}\t{d.text}\n" for d in definitions)
+                   + "".join(f"DUPLICATE {line}\n" for line in duplicates)
+                   + "".join(f"AMBIGUOUS {line}\n" for line in ambiguous), encoding="utf-8")
+    r.log = g.rel(log)
+    r.metric = f"{len(definitions)} step definition(s), {len(duplicates)} duplicated, {len(ambiguous)} ambiguous step(s)"
+    if duplicates or ambiguous:
+        r.status = "fail"
+        r.detail = ("Every step needs exactly one definition. Find the existing one and reuse it, extending it if it has "
+                    "to; steps more than one feature uses belong in one shared place (such as the steps' common/ "
+                    "folder or the acceptance tests' conftest.py), and the copy goes:\n"
+                    + "\n".join((duplicates + ambiguous)[:30]))
 
 
 def check_complexity(g: Gate, r: Result) -> None:
@@ -2142,6 +2386,7 @@ CHECKS = {
     "lint": check_lint,
     "tests": check_tests,
     "undefined-steps": check_undefined_steps,
+    "duplicate-steps": check_duplicate_steps,
     "complexity": check_complexity,
     "cognitive": check_cognitive,
     "npath": check_npath,
@@ -2162,6 +2407,7 @@ CHECKS = {
 def main() -> int:
     parser = argparse.ArgumentParser(description="ATDD quality gate")
     parser.add_argument("mode", choices=list(MODES))
+    parser.add_argument("--version", action="version", version=f"atdd gate {GATE_VERSION}")
     parser.add_argument("--only", help="comma-separated subset of checks to run")
     parser.add_argument("--base", default=os.environ.get("ATDD_BASE"))
     parser.add_argument("--out", default=os.environ.get("ATDD_OUT"))
@@ -2195,7 +2441,9 @@ def main() -> int:
     (out / "logs").mkdir(parents=True, exist_ok=True)
     marker.write_text("Created by scripts/atdd/gate.py; cleared at the start of every run.\n", encoding="utf-8")
 
-    base = resolve_base(root, config, args.base)
+    base, base_note = resolve_base(root, config, args.base)
+    if base_note:
+        print(f"Base: {base_note}", flush=True)
     gate = Gate(root=root, config=config, mode=args.mode, base=base, out=out, scenarios_commit=args.scenarios_commit,
                 stack=stack, profile=STACKS[stack], gate_config=gate_config,
                 thresholds={**DEFAULT_THRESHOLDS, **(gate_config.get("thresholds") or {})},
@@ -2232,6 +2480,7 @@ def main() -> int:
         "mode": args.mode,
         "stack": stack,
         "base": base,
+        "baseNote": base_note,
         "head": head,
         "dirty": bool(git(root, "status", "--porcelain").strip()),
         "passed": passed,
@@ -2246,6 +2495,8 @@ def main() -> int:
 
     print()
     print(f"ATDD gate ({args.mode}) on {head[:10]} vs base {base[:10]}: {'PASS' if passed else 'FAIL'}")
+    if base_note:
+        print(f"Base: {base_note}")
     for r in results:
         if r.status in ("fail", "warn"):
             print(f"\n## {r.name}: {r.status.upper()}" + (f" ({r.metric})" if r.metric else ""))

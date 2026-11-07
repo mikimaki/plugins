@@ -41,10 +41,10 @@ Refactoring and improving aren't your job either, not even in tests you didn't w
 The prompt gives you:
 
 - the issue key and the spec snapshot, `.atdd/<issue-key>/spec.md`;
-- the feature directory, with `requirements.md` and the `.feature` files (both locked);
+- the feature directory, with `requirements.md` and the `.feature` files (both locked). In a unit of `/atdd:cover-queue`, the prompt names the one `.feature` file this run covers: bind only its scenarios. Any other `.feature` file on the branch was covered by an earlier unit, and the requirements its scenarios don't tag belong to the area's other files;
 - the test paths, the only files you may change;
 - the base commit and the commit holding the approved scenarios;
-- the coverage targets file, `.atdd/<issue-key>/cover/targets.txt`;
+- the coverage targets file (`.atdd/<issue-key>/cover/targets.txt`, or per unit `.atdd/<issue-key>/cover/<file>/targets.txt`);
 - the round number;
 - uncommitted test files from an earlier run, if there are any;
 - in fix rounds, the blocking findings to address.
@@ -58,23 +58,27 @@ The prompt gives you:
    - `CLAUDE.md`/`AGENTS.md` and the glossary;
    - the existing tests and acceptance-test setup;
    - the stack's binding reference and `references/existing-code.md`.
-2. **Trace each scenario through the code.** For every scenario, find:
+2. **Find the step definitions that already exist** before you write one. Search every step definition in the test paths for each step's text, phrasing variants included. Earlier work, and in a queue every earlier unit, has defined many of them already, especially the common Givens such as who's signed in.
+   - **Reuse an existing definition** when it matches the step. Extend it (a parameter, a broader Cucumber expression that still checks every value) when it almost does, as long as the tests that use it keep passing.
+   - **Keep steps that more than one feature uses in one shared place**: `features/steps/common/` for playwright-bdd and Cucumber.js, the acceptance tests' `conftest.py` (or a module it imports) for pytest-bdd, a shared `[Binding]` class such as `CommonSteps.cs` for Reqnroll. When you reuse a step that lives in one feature's own steps file, move it there.
+   - **Never define a step text a second time.** Two definitions that match one step make the suite ambiguous, or, in pytest-bdd, silently run whichever was registered last. The gate's `duplicate-steps` check fails the commit on it.
+3. **Trace each scenario through the code.** For every scenario, find:
    - the public interface its When drives: the route, page, handler, job entry point or CLI that a user or client uses;
    - the code that produces each Then's outcome, and where that outcome can be observed from outside: the response, a follow-up query, a message a boundary fake captured;
    - how its Given state can be arranged: the system's own interfaces, or the repo's existing seeding;
    - every boundary the path crosses: third-party APIs, email, the clock, queues.
-3. **Write the coverage targets**: the production files that implement the behaviors in the ledger, one repo-relative path per line, in the coverage targets file. List the files whose behavior the scenarios pin down, not every file a request passes through (framework setup, generic middleware, the ORM context). The quality gate measures your tests on exactly these files, and the reviewer checks the list is honest: nothing the scenarios exercise left out, nothing padded in.
-4. **Find a seam for every boundary without touching the code** (`references/existing-code.md`). If a scenario can't be controlled without a production change, don't fake the system's own logic to get around it. That happens when the code reads the system clock directly or builds its HTTP client inline, for example. Report `blocked`, naming the file and line and the smallest seam a human would add.
-5. **Bind every scenario** as `gherkin-binding` describes:
+4. **Write the coverage targets**: the production files that implement the behaviors in the ledger, one repo-relative path per line, in the coverage targets file. List the files whose behavior the scenarios pin down, not every file a request passes through (framework setup, generic middleware, the ORM context). The quality gate measures your tests on exactly these files, and the reviewer checks the list is honest: nothing the scenarios exercise left out, nothing padded in.
+5. **Find a seam for every boundary without touching the code** (`references/existing-code.md`). If a scenario can't be controlled without a production change, don't fake the system's own logic to get around it. That happens when the code reads the system clock directly or builds its HTTP client inline, for example. Report `blocked`, naming the file and line and the smallest seam a human would add.
+6. **Bind every scenario** as `gherkin-binding` describes:
    - in through the public interface, out through observable outcomes;
    - fakes only at the system boundary;
    - per-scenario state, no sleeps.
 
    Then run them.
-6. **A scenario that passes at once proves nothing yet.** The code already existed, so there was no red phase. Check every Then whose assertion could be hollow, for example one that compares two values the test supplied itself or checks only a status. Break its expectation in the step definition for a moment, watch the scenario fail with a message that names the outcome, and restore it.
+7. **A scenario that passes at once proves nothing yet.** The code already existed, so there was no red phase. Check every Then whose assertion could be hollow, for example one that compares two values the test supplied itself or checks only a status. Break its expectation in the step definition for a moment, watch the scenario fail with a message that names the outcome, and restore it.
 
    Stop there. Breaking the production code to see whether the scenarios notice is the quality stage's job: it mutates every coverage target and runs your scenarios against each mutant, and it measures their coverage too. Its findings come back to you, so don't spend your round repeating that work.
-7. **Find out why a failing scenario fails.** There are three possible causes:
+8. **Find out why a failing scenario fails.** There are three possible causes:
    - **Your binding is wrong**, for example the wrong route, data shape or Given state: fix the binding.
    - **The test environment differs from the real one**, for example missing configuration or an unmigrated database: fix the test setup, inside the test paths.
    - **The code doesn't do what the scenario says.** That's a discrepancy:
@@ -85,8 +89,8 @@ The prompt gives you:
      Record the discrepancy and go on to the next scenario.
 
    Bind and run every scenario before you stop, so the human gets the complete list of discrepancies in one go.
-8. **If there are discrepancies, stop here without committing.** The strict runner fails on them, so the commit hook would refuse anyway. Leave your test files in the working tree, unstaged, because the next run continues from them, and report every discrepancy.
-9. **Otherwise run the cover fast checks** (`commands.coverFastChecks`), then commit with a message like `test(<issue-key>): cover <capability> with acceptance tests`. The commit hook refuses the commit while anything outside the test paths or any locked file is modified, and runs the checks again.
+9. **If there are discrepancies, stop here without committing.** The strict runner fails on them, so the commit hook would refuse anyway. Leave your test files in the working tree, unstaged, and report every discrepancy. A later run continues from them; in a queue, the workflow parks them in a WIP commit on the unit's branch.
+10. **Otherwise run the cover fast checks** (`commands.coverFastChecks`), then commit with a message like `test(<issue-key>): cover <capability> with acceptance tests`. The commit hook refuses the commit while anything outside the test paths or any locked file is modified, and runs the checks again.
 
 ## Fix rounds
 
@@ -96,7 +100,7 @@ Each finding has an id and comes from the coverage reviewer, QA or the quality g
   - a weak assertion gets the assertion its Then states;
   - a step that goes around the real path goes through the public interface;
   - a flaky step gets controlled time and data of its own.
-- **When an honest fix makes a scenario fail against the code**, the old step was hiding a discrepancy. Report it and stop without committing, as in round 1, step 8.
+- **When an honest fix makes a scenario fail against the code**, the old step was hiding a discrepancy. Report it and stop without committing, as in round 1, step 9.
 - **Answer each finding:**
   - `fixed`, with what changed; or
   - `disputed`, with evidence. Dispute only when the finding is wrong about the scenarios, the code or the rules.
@@ -126,4 +130,4 @@ The hooks and the gate enforce most of these, and every later stage checks them 
   - what the code does instead, observed and quoted;
   - where the code decides it (`file:line`).
 - **Per-finding responses** (fix rounds).
-- **`blocked`**, if you couldn't go on: the missing seam, package or answer, and the smallest change a human would make.
+- **`blocked`**, if you couldn't go on: the missing seam, package or answer, and the smallest change a human would make. Set `blockedScope` to `repo` when it would block any scenarios in this repo the same way (a test package or tool that's missing, an acceptance-test setup that doesn't run at all), and to `unit` when it concerns these scenarios (a seam this code path lacks, a question the spec doesn't answer). In a queue, `repo` stops the whole queue and `unit` parks only this unit.

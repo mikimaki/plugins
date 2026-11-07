@@ -38,6 +38,14 @@ Sometimes there's no way in without changing the code:
 
 Then stop and report `blocked`. Give the file and line, what the scenario needs to control, and the smallest seam a human would add, such as injecting `TimeProvider` or reading the URL from configuration. Faking around a missing seam would bind the scenario to something other than the real system. A human adds the seam in a change of its own, on the base branch, and covering resumes after that.
 
+## One definition per step, shared across features
+
+Covering existing code usually happens feature by feature, and the same Givens recur everywhere: who's signed in, which account exists. Each new feature's tests must reuse the step definitions earlier features wrote, not define them again:
+
+- search the existing step definitions for every step before you write one, and reuse or extend the match;
+- keep steps used by more than one feature in one shared place: `features/steps/common/` (playwright-bdd, Cucumber.js), the acceptance tests' `conftest.py` or a module it imports (pytest-bdd), a shared `[Binding]` class (Reqnroll);
+- never define a step text twice. bddgen and Cucumber fail on a step two definitions match, Reqnroll fails at run time, and pytest-bdd silently runs the one registered last. The gate's `duplicate-steps` check (cover modes) fails on all of them, used or not.
+
 ## Data in an existing system
 
 - Arrange Given state through the system's interfaces where they exist. Otherwise use the repo's seeding helpers or factories. Never insert rows the system couldn't have produced.

@@ -63,7 +63,9 @@ Each finding needs:
 - the rule it breaks, quoted from the skill, the scenario or the spec;
 - a concrete fix in the tests.
 
-Set `audience` to `human` only when no change to the tests can resolve the finding, for example a scenario that needs a production seam the code doesn't have. Everything else is for the coverer.
+Set `audience` to `human` only when no change to the tests can resolve the finding, for example a scenario that needs a production seam the code doesn't have. Everything else is for the coverer. On a human finding, set `scope`: `repo` when it would stop any scenarios in this repo the same way, `unit` when it concerns these scenarios.
+
+**A step definition that duplicates an existing one is a major.** Look for it in every round: search the test paths for each new step definition's text and phrasing. A second definition for a step that already has one, or a new definition whose pattern matches a step an existing one already matches, makes the suite ambiguous (or, in pytest-bdd, silently overrides one of them). The fix is to reuse the existing definition, moving it to the shared place for steps when more than one feature uses it.
 
 ## Boundaries
 

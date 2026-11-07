@@ -16,6 +16,10 @@ const ref = String(input.issue || input.ref || input.issueRef || '').trim()
 if (!ref) {
   return { status: 'needs-input', message: 'Give the issue reference, e.g. /atdd:cover PROJ-45' }
 }
+// Set by /atdd:cover-queue: cover one .feature file of the area on its own branch, stacked on stackTop.
+const unit = input.unit && input.unit.feature ? input.unit : null
+let agentCalls = 0
+const run = (prompt, opts) => { agentCalls++; return agent(prompt, opts) }
 
 const STRINGS = { type: 'array', items: { type: 'string' } }
 const FINDING = {
@@ -25,6 +29,7 @@ const FINDING = {
     id: { type: 'string' },
     severity: { type: 'string', enum: ['blocker', 'major', 'minor', 'nit'] },
     audience: { type: 'string', enum: ['coverer', 'human'] },
+    scope: { type: 'string', enum: ['unit', 'repo'] },
     file: { type: 'string' },
     location: { type: 'string' },
     title: { type: 'string' },
@@ -43,13 +48,19 @@ const PREP = {
     title: { type: 'string' },
     specPath: { type: 'string' },
     featureDir: { type: 'string' },
+    featureFiles: STRINGS,
+    scenarioCount: { type: 'integer' },
     branch: { type: 'string' },
+    parent: { type: 'string' },
     base: { type: 'string' },
+    baseNote: { type: 'string' },
     scenariosCommit: { type: 'string' },
     testPaths: STRINGS,
     unfinishedWork: STRINGS,
+    workDir: { type: 'string' },
     maxRounds: { type: 'integer' },
     hasQa: { type: 'boolean' },
+    failureScope: { type: 'string', enum: ['unit', 'repo'] },
   },
 }
 const COVERAGE = {
@@ -89,6 +100,7 @@ const COVERAGE = {
     },
     blocked: { type: 'boolean' },
     blockedReason: { type: 'string' },
+    blockedScope: { type: 'string', enum: ['unit', 'repo'] },
   },
 }
 const CHECK = {
@@ -134,17 +146,31 @@ const STAGES = [
 const isBlocking = f => f.severity === 'blocker' || f.severity === 'major'
 const forHuman = f => f.audience === 'human'
 const json = value => JSON.stringify(value, null, 2)
-const targetsFile = prep => `.atdd/${prep.key}/cover/targets.txt`
+const workDir = prep => prep.workDir || `.atdd/${prep.key}/cover`
+const targetsFile = prep => `${workDir(prep)}/targets.txt`
 
 function context(prep) {
-  return [
+  const lines = [
     `Issue ${prep.key}: "${prep.title}". The scenarios describe behavior the code already has: this run adds acceptance tests and changes nothing else.`,
     `Spec (source of truth): ${prep.specPath}`,
-    `Approved scenarios: ${prep.featureDir} (last committed in ${prep.scenariosCommit}).`,
-    `Branch ${prep.branch}; the work under test is git diff ${prep.base}..HEAD (base = merge-base with the base branch).`,
+  ]
+  if (unit) {
+    lines.push(
+      `Approved scenarios for this run: ${(prep.featureFiles || [unit.feature]).join(', ')} only, against the area's ledger ${prep.featureDir}requirements.md (committed in ${prep.scenariosCommit}). Requirements the ledger lists that these scenarios don't tag belong to the area's other .feature files, which other units cover.`,
+      `This is one unit of /atdd:cover-queue. Any other .feature file on the branch was covered by an earlier unit, whose step definitions are already here: search them before writing a step, and reuse or extend the existing one. A step text must have exactly one definition (the gate's duplicate-steps check fails otherwise).`,
+      `Branch ${prep.branch}, stacked on ${prep.parent || unit.stackTop}; the work under test is git diff ${prep.base}..HEAD (base = where this branch leaves its stack parent).`,
+    )
+  } else {
+    lines.push(
+      `Approved scenarios: ${prep.featureDir} (last committed in ${prep.scenariosCommit}).`,
+      `Branch ${prep.branch}; the work under test is git diff ${prep.base}..HEAD (base = merge-base with the base branch).`,
+    )
+  }
+  lines.push(
     `Test paths, the only files this work may change: ${prep.testPaths.join(', ')}.`,
     `Coverage targets file: ${targetsFile(prep)}.`,
-  ].join('\n')
+  )
+  return lines.join('\n')
 }
 
 function coverPrompt(prep, round, maxRounds, failed) {
@@ -166,23 +192,40 @@ function stagePrompt(stage, prep, round, sha, memory) {
   if (stage.key === 'review' && memory.lastApproved) {
     lines.push(`You approved ${memory.lastApproved} in an earlier round. Focus on git diff ${memory.lastApproved}..${sha} and whatever it affects, but check again that nothing outside the test paths changed on the whole branch.`)
   }
-  if (stage.key === 'qa') lines.push(`Evidence directory: .atdd/${prep.key}/cover/qa/round-${round}/`)
+  if (stage.key === 'qa') lines.push(`Evidence directory: ${workDir(prep)}/qa/round-${round}/`)
   if (stage.key === 'quality') {
-    lines.push(`Run the gate with ATDD_BASE=${prep.base} ATDD_SCENARIOS_COMMIT=${prep.scenariosCommit} ATDD_COVER_TARGETS=${targetsFile(prep)} ATDD_OUT=.atdd/${prep.key}/cover/quality/round-${round}`)
+    lines.push(`Run the gate with ATDD_BASE=${prep.base} ATDD_SCENARIOS_COMMIT=${prep.scenariosCommit} ATDD_COVER_TARGETS=${targetsFile(prep)} ATDD_OUT=${workDir(prep)}/quality/round-${round}`)
   }
   if (memory.findings.length) {
     lines.push('Your blocking findings from your last run, and the coverer\'s responses. Judge each one in priorFindings (resolved, dispute-accepted or still-open), checking the tests or the app yourself; a still-open one must also appear again in findings:')
     lines.push(json({ findings: memory.findings, responses: memory.responses }))
   }
-  lines.push('Work as your instructions describe and report. verdict must be "fail" if any finding is a blocker or major. Set audience "human" only on a finding no change to the tests can resolve; a blocking one stops the run for a human instead of going back to the coverer.')
+  lines.push('Work as your instructions describe and report. verdict must be "fail" if any finding is a blocker or major. Set audience "human" only on a finding no change to the tests can resolve; a blocking one stops the run for a human instead of going back to the coverer. On a human finding, set scope "repo" when it would stop any scenarios in this repo the same way (the app doesn\'t start, a tool or the gate\'s setup is missing), and "unit" when it concerns these scenarios (a missing seam, a question the spec doesn\'t answer).')
   return lines.join('\n\n')
 }
 
+function prepPrompt() {
+  const lines = [`Mode: cover. Issue reference: ${ref}`]
+  if (unit) {
+    lines.push([
+      'Unit of /atdd:cover-queue (see "Cover mode, one unit" in your instructions):',
+      `- area key: ${ref}`,
+      `- feature file: ${unit.feature}`,
+      `- source ref holding the scenarios and the spec: ${unit.source}`,
+      `- unit branch: ${unit.branch}`,
+      `- stack top, the branch this unit is cut from (or rebased onto): ${unit.stackTop}`,
+    ].join('\n'))
+  }
+  return lines.join('\n\n')
+}
+
+const unitFields = unit ? { unit: unit.feature, branch: unit.branch } : {}
 phase('Prepare')
-const prep = await agent(`Mode: cover. Issue reference: ${ref}`, { label: 'prepare', phase: 'Prepare', agentType: 'atdd:preparer', schema: PREP })
-if (!prep) return { status: 'needs-human', stage: 'prepare', reason: 'The preparer did not finish.' }
-if (!prep.ok) return { status: 'needs-human', stage: 'prepare', reason: prep.reason || 'Preparation failed.' }
-if (!(prep.testPaths || []).length) return { status: 'needs-human', stage: 'prepare', reason: 'The preparer reported no test paths; set gate.testDirs or cover.testPaths in .claude/atdd.json.' }
+const prep = await run(prepPrompt(), { label: 'prepare', phase: 'Prepare', agentType: 'atdd:preparer', schema: PREP })
+if (!prep) return { status: 'needs-human', stage: 'prepare', scope: 'repo', reason: 'The preparer did not finish.', agentCalls, ...unitFields }
+if (!prep.ok) return { status: 'needs-human', stage: 'prepare', scope: prep.failureScope || 'repo', reason: prep.reason || 'Preparation failed.', agentCalls, ...unitFields, branch: prep.branch || unitFields.branch }
+if (!(prep.testPaths || []).length) return { status: 'needs-human', stage: 'prepare', scope: 'repo', reason: 'The preparer reported no test paths; set gate.testDirs or cover.testPaths in .claude/atdd.json.', agentCalls, ...unitFields }
+if (prep.baseNote) log(`Base: ${prep.baseNote}`)
 
 const stages = STAGES.filter(s => s.key !== 'qa' || prep.hasQa)
 if (!prep.hasQa) log('No commands.qaUp in .claude/atdd.json, so the QA stage is skipped. Run /atdd:init to set it up.')
@@ -194,6 +237,7 @@ const advisory = {}
 let failed = null
 let sha = null
 let targets = []
+let metrics = []
 
 function report(status, extra) {
   return {
@@ -202,26 +246,34 @@ function report(status, extra) {
     title: prep.title,
     branch: prep.branch,
     base: prep.base,
+    baseNote: prep.baseNote || '',
     sha,
     testPaths: prep.testPaths,
     targets,
     rounds: history.length ? history[history.length - 1].round : 0,
     history,
     advisory: Object.values(advisory).flat(),
+    metrics,
+    agentCalls,
+    ...(unit ? { unit: unit.feature, parent: prep.parent || unit.stackTop, featureFiles: prep.featureFiles || [unit.feature], scenarioCount: prep.scenarioCount || 0, workDir: workDir(prep) } : {}),
+    ...(status === 'done' ? {} : { scope: 'unit' }),
     ...extra,
   }
 }
 
-const humanNext = `Resolve the findings outside the tests yourself. A change to production code, configuration or packages belongs in a change of its own on the base branch; update this branch from it, then re-run /atdd:cover ${ref}.`
+const rerun = unit
+  ? `re-run /atdd:cover-queue ${unit.source} ${unit.feature} --resume-parked; it continues from the parked test files`
+  : `re-run /atdd:cover ${ref}`
+const humanNext = `Resolve the findings outside the tests yourself. A change to production code, configuration or packages belongs in a change of its own on the base branch; update this branch from it, then ${rerun}.`
 
 for (let round = 1; round <= maxRounds; round++) {
-  const coverage = await agent(coverPrompt(prep, round, maxRounds, failed), {
+  const coverage = await run(coverPrompt(prep, round, maxRounds, failed), {
     label: `cover · round ${round}`,
     phase: 'Cover',
     agentType: 'atdd:acceptance-test-coverer',
     schema: COVERAGE,
   })
-  if (!coverage) return report('needs-human', { stage: 'cover', reason: 'The acceptance-test-coverer did not finish.', outstanding: failed ? failed.findings : [] })
+  if (!coverage) return report('needs-human', { stage: 'cover', scope: 'repo', reason: 'The acceptance-test-coverer did not finish.', outstanding: failed ? failed.findings : [] })
   if (coverage.targets.length) targets = coverage.targets
   if (coverage.discrepancies.length) {
     return report('discrepancies', {
@@ -230,11 +282,13 @@ for (let round = 1; round <= maxRounds; round++) {
       discrepancies: coverage.discrepancies,
       coverSummary: coverage.summary,
       ...(coverage.blocked ? { alsoBlocked: coverage.blockedReason || 'The coverer also reported it is blocked.' } : {}),
-      next: `For each discrepancy decide which side is wrong. A wrong scenario: fix the spec and re-run /atdd:gherkin ${ref}, or edit the scenarios yourself. Wrong code (a bug): fix it in a change of its own on the base branch, then update this branch from it. Then re-run /atdd:cover ${ref}; the coverer continues from its uncommitted test files.`,
+      next: unit
+        ? `For each discrepancy decide which side is wrong. A wrong scenario: fix it on ${unit.source} (the spec and the scenarios). Wrong code (a bug): fix it in a change of its own on the base branch. Then ${rerun}.`
+        : `For each discrepancy decide which side is wrong. A wrong scenario: fix the spec and re-run /atdd:gherkin ${ref}, or edit the scenarios yourself. Wrong code (a bug): fix it in a change of its own on the base branch, then update this branch from it. Then re-run /atdd:cover ${ref}; the coverer continues from its uncommitted test files.`,
     })
   }
   if (coverage.blocked) {
-    return report('needs-human', { stage: 'cover', reason: coverage.blockedReason || 'The acceptance-test-coverer reported it is blocked.', outstanding: failed ? failed.findings : [], next: humanNext })
+    return report('needs-human', { stage: 'cover', scope: coverage.blockedScope || 'unit', reason: coverage.blockedReason || 'The acceptance-test-coverer reported it is blocked.', outstanding: failed ? failed.findings : [], next: humanNext })
   }
   if (!coverage.sha) return report('needs-human', { stage: 'cover', reason: 'The acceptance-test-coverer reported no commit.' })
   if (failed && coverage.sha === failed.sha) {
@@ -248,13 +302,14 @@ for (let round = 1; round <= maxRounds; round++) {
 
   failed = null
   for (const stage of stages) {
-    const result = await agent(stagePrompt(stage, prep, round, sha, memory[stage.key]), {
+    const result = await run(stagePrompt(stage, prep, round, sha, memory[stage.key]), {
       label: `${stage.key} · round ${round}`,
       phase: stage.phase,
       agentType: stage.agentType,
       schema: CHECK,
     })
-    if (!result) return report('needs-human', { stage: stage.key, reason: `The ${stage.name} agent did not finish.` })
+    if (!result) return report('needs-human', { stage: stage.key, scope: 'repo', reason: `The ${stage.name} agent did not finish.` })
+    if (stage.key === 'quality') metrics = result.results || []
 
     const blocking = result.findings.filter(isBlocking).map(f => ({ ...f, id: f.id.startsWith(`${stage.key}-`) ? f.id : `${stage.key}-${f.id}` }))
     advisory[stage.key] = result.findings.filter(f => !isBlocking(f)).map(f => ({ ...f, stage: stage.key }))
@@ -267,6 +322,7 @@ for (let round = 1; round <= maxRounds; round++) {
       log(`Round ${round}: the ${stage.name} raised findings only a human can resolve.`)
       return report('needs-human', {
         stage: stage.key,
+        scope: blocking.some(f => forHuman(f) && f.scope === 'repo') ? 'repo' : 'unit',
         reason: `The ${stage.name} raised ${blocking.filter(forHuman).length} blocking finding(s) that no change to the tests can resolve.`,
         outstanding: blocking,
         next: humanNext,
@@ -282,7 +338,9 @@ for (let round = 1; round <= maxRounds; round++) {
 
   if (!failed) {
     return report('done', {
-      next: `All checks passed on ${sha}, and the branch changes nothing outside the test paths. Read the diff (git diff ${prep.base}..${sha}), then push the branch and open a PR. The advisory findings list behavior no scenario covers yet: add it to the spec before refactoring that code.`,
+      next: unit
+        ? `All checks passed on ${sha}, and the unit changes nothing outside the test paths (git diff ${prep.base}..${sha}).`
+        : `All checks passed on ${sha}, and the branch changes nothing outside the test paths. Read the diff (git diff ${prep.base}..${sha}), then push the branch and open a PR. The advisory findings list behavior no scenario covers yet: add it to the spec before refactoring that code.`,
     })
   }
 }
@@ -291,5 +349,5 @@ return report('needs-human', {
   stage: failed.stage.key,
   reason: `Still failing after ${maxRounds} round(s).`,
   outstanding: failed.findings,
-  next: `Read the outstanding findings. Fix or overrule them yourself (in the tests only), then re-run /atdd:cover ${ref} to continue from the current commit.`,
+  next: `Read the outstanding findings. Fix or overrule them yourself (in the tests only), then ${rerun} to continue from the current commit.`,
 })

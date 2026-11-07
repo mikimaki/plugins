@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Stub GitHub CLI for the cover-queue fixture: records every call as one JSON line, answers like gh would.
+log="${GH_STUB_LOG:?set GH_STUB_LOG}"
+python3 - "$log" "$@" <<'PY'
+import json, sys, os
+log, args = sys.argv[1], sys.argv[2:]
+with open(log, "a") as f:
+    f.write(json.dumps({"args": args, "cwd": os.getcwd()}) + "\n")
+PY
+case "$1 $2" in
+  "auth status") echo "github.com: Logged in to github.com account stub (keyring)"; exit 0 ;;
+  "pr create")
+    n=$(grep -c '"pr", "create"' "$log")
+    echo "https://github.com/example/stride/pull/$((100 + n))"; exit 0 ;;
+  "pr list") echo "[]"; exit 0 ;;
+  "pr view") echo "no pull requests found" >&2; exit 1 ;;
+  "repo view") echo '{"nameWithOwner":"example/stride"}'; exit 0 ;;
+  *) exit 0 ;;
+esac

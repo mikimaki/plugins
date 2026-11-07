@@ -23,10 +23,15 @@ python3 scripts/atdd/gate.py full             # the full gate (the quality-teste
 python3 scripts/atdd/gate.py full --only mutation,diff-coverage
 python3 scripts/atdd/gate.py cover-fast       # /atdd:cover's commit gate (the coverer's commit hook runs this)
 python3 scripts/atdd/gate.py cover-full       # /atdd:cover's full gate (the coverage-quality-tester runs this)
+python3 scripts/atdd/gate.py --version        # atdd gate 0.4.0; /atdd:cover-queue needs 0.4.0 or later
 ```
 
 **Environment variables:**
-- `ATDD_BASE`: the diff base. Defaults to the merge-base with `baseBranch`.
+- `ATDD_BASE`: the diff base. Without it, the gate uses:
+  - on a `/atdd:cover-queue` unit branch, where the unit leaves its stack parent (`git config branch.<branch>.atddBase`), then the integration branch once that parent is merged and deleted, so each unit is judged on its own change;
+  - otherwise the merge-base with `baseBranch`.
+
+  Of a local branch and its `origin/` copy, it uses the one that contains the other, so a local `baseBranch` that's behind `origin` doesn't make already-merged files count as changed. When they differ, the gate says so (`Base: …`) and records it as `baseNote` in `report.json`.
 - `ATDD_OUT`: the output directory. Defaults to `.atdd/quality/latest`, and is cleared on every run.
 - `ATDD_SCENARIOS_COMMIT`: the commit holding the approved scenarios, used by the locked-files check.
 - `ATDD_COVER_TARGETS`: cover modes only. A file listing, one per line, the production files the acceptance tests protect.
@@ -142,11 +147,12 @@ A gate that passes while measuring nothing is worse than no gate. These guards a
 
 - **The test code is what gets measured.** `complexity`, `cognitive`, `npath` and `dead-code` look at the changed test code in the cover modes, where they'd look at production code otherwise. `format`, `lint`, `duplication` and `suppressions` cover test files in every mode.
 - **Production code isn't judged at all.** `dependency-cycles`, `architecture`, `diff-coverage`, `mutation` and `vulnerabilities` don't run. So a repo whose existing code has dependency cycles can be covered with acceptance tests before anyone breaks the cycles, and should be: the tests are what make breaking them safe.
-- **Three checks exist only in cover mode:**
+- **Four checks exist only in cover mode:**
 
 | Check | Measures | Fails when |
 |---|---|---|
 | `production-untouched` | every file that differs from the base, committed or not (added, modified, deleted, both sides of a rename, untracked), against the test paths | any file outside the test paths differs, or the test paths are missing or would match production files |
+| `duplicate-steps` | every step definition in the test paths, changed or not: Reqnroll attributes, Cucumber.js and playwright-bdd `Given`/`When`/`Then` calls, pytest-bdd decorators. For pytest-bdd it also matches every step of the working tree's `.feature` files against them | a step text (or pattern) is defined more than once, or, in pytest-bdd, a step matches more than one definition |
 | `acceptance-coverage` | runs the acceptance tests alone with coverage, and reports the lines and branches of the coverage targets they never run | a target is missing from the report, or no acceptance test runs a single line of it; gaps are `warn` |
 | `acceptance-mutation` | mutates the coverage targets and runs only the acceptance tests against each mutant | the run crashes or writes no report; mutants they don't notice are `warn` |
 
@@ -154,8 +160,16 @@ A gate that passes while measuring nothing is worse than no gate. These guards a
 
 **Which checks run in each cover mode** comes from `gate.coverFast` / `gate.coverFull`. When unset:
 
-- `cover-fast`: production-untouched, build, format, lint, tests, undefined-steps, complexity, cognitive, npath, suppressions.
+- `cover-fast`: production-untouched, build, format, lint, tests, undefined-steps, duplicate-steps, complexity, cognitive, npath, suppressions.
 - `cover-full`: those, plus duplication, locked-files, acceptance-coverage and acceptance-mutation.
+
+**Why duplicate steps get a check of their own.** Covering existing code goes feature by feature, and the same Givens recur in every area. The runners differ on what a second definition does:
+
+- bddgen (playwright-bdd) and Cucumber.js fail on a step two definitions match, whatever their keywords, but only when a feature uses that step. The gate's `undefined-steps` check already runs them (Cucumber's dry run reports the step `AMBIGUOUS`);
+- Reqnroll fails on an ambiguous binding when the scenario runs;
+- pytest-bdd fails on nothing: the definition registered last wins, silently, and a conftest step loses to a module's own.
+
+So `duplicate-steps` catches what none of them does: a duplicate no feature uses yet, and pytest-bdd's silent override.
 
 **Why coverage and mutation gaps warn instead of failing.** A target line no scenario runs, or a mutant no scenario notices, means one of two things:
 
@@ -175,7 +189,7 @@ A threshold can't tell the two apart; the coverage-quality-tester can.
 
 Overrides: `gate.commands.acceptanceCoverage` with `gate.acceptanceCoverageReports` (Cobertura globs), and `gate.commands.acceptanceMutation` with `gate.acceptanceMutationReport` (a Stryker JSON report). A Python override must leave mutmut's results for `mutmut results`. The per-stack references have the details.
 
-**Coverage targets** are the production files whose behavior the scenarios pin down. The acceptance-test-coverer writes them to `.atdd/<issue-key>/cover/targets.txt`, and the coverage reviewer checks they're honest.
+**Coverage targets** are the production files whose behavior the scenarios pin down. The acceptance-test-coverer writes them to `.atdd/<issue-key>/cover/targets.txt` (per `/atdd:cover-queue` unit, `.atdd/<issue-key>/cover/<file>/targets.txt`), and the coverage reviewer checks they're honest.
 
 ## Reading the results
 
@@ -221,6 +235,7 @@ The implementer gets your findings, not the logs. Write each one so it can be fi
 - **undefined-steps / tests.** Name the failing scenario or test and quote the first assertion message.
 - **A `warn` on vulnerabilities**, or a `skipped` because rules aren't configured, is a minor finding addressed to a human, not to the implementer.
 - **production-untouched** (cover mode). List the files. They must be reverted, or deleted if the change created them; a change outside the test paths is never the coverer's to make.
+- **duplicate-steps** (cover mode). Name the step text and every definition the log lists. Say which one stays (usually the older, or the one in the shared place for steps) and that the other goes, with its callers reusing the one that stays.
 - **acceptance-coverage / acceptance-mutation** (cover mode). Judge each gap rather than reporting the metric: if a scenario claims the behavior, the gap is a major for the coverer (a step that goes around the real path, or asserts less than its Then); if no scenario claims it, it's a spec gap, a minor finding for a human. Group gaps by behavior.
 
 ## Setting the gate up in a repo

@@ -69,7 +69,8 @@ Follow `references/<stack>.md`. In every case:
      - every file that holds a threshold or a strictness setting.
 
      A threshold the implementer can edit isn't a threshold.
-   - `gate.testDirs` must name test folders only. `/atdd:cover` lets its coverer change files there (and in `featuresDir`) and nowhere else, so a production folder in that list would let it change production code. To narrow it further, for example to the acceptance test project, set `cover.testPaths` to globs.
+   - `gate.testDirs` must name test folders only. `/atdd:cover` lets its coverer change files there (and in `featuresDir`) and nowhere else, so a production folder in that list would let it change production code. To narrow it further, for example to the acceptance test project, set `cover.testPaths` to globs; keep `featuresDir` inside them.
+   - `/atdd:cover-queue` reads three optional `cover` keys: `integrationBranch` (default `atdd/cover-base`), `openPrs` (default `false`) and `maxConsecutiveParks` (default 3). Leave them out unless the user asks.
 2. **Copy into `scripts/atdd/`:**
    - the gate, `${CLAUDE_PLUGIN_ROOT}/skills/quality-gate/scripts/gate.py`, unchanged, as `scripts/atdd/gate.py`;
    - the gate's helpers for the stack, unchanged: `eslint.quality.mjs`, `eslint-npath.mjs`, `coverage.mjs` and `cobertura-reporter.mjs` from `templates/typescript/` (TypeScript and Next.js), or the `templates/dotnet/dotnet-quality/` folder (.NET);

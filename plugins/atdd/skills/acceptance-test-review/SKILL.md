@@ -63,7 +63,7 @@ Ask of every step: if later work restructured the code but kept the behavior, wo
 
 ## 4. Coverage targets
 
-The coverage targets file, `.atdd/<issue-key>/cover/targets.txt`, lists the production files whose behavior the scenarios pin down. The quality gate measures the tests on exactly these files. Check that:
+The coverage targets file, `.atdd/<issue-key>/cover/targets.txt` (per queue unit, `.atdd/<issue-key>/cover/<file>/targets.txt`), lists the production files whose behavior the scenarios pin down. The quality gate measures the tests on exactly these files. Check that:
 
 - every entry is production code, not a test or a generated file;
 - the files implementing the ledger's behaviors are all there. Trace one scenario's When to the code that handles it, and check that every file deciding an outcome on the way is listed;
@@ -76,7 +76,8 @@ A wrong list is a **major**: it makes the gate measure the wrong thing.
 Test code is code, and `coding-standards` applies to it:
 
 - step definitions stay thin and use the scenario's language; interaction details live in drivers or page objects;
-- there's one step definition per phrasing, with parameters matched by Cucumber expressions;
+- there's one step definition per phrasing, with parameters matched by Cucumber expressions, and **exactly one definition per step text across the whole suite**. A new definition for a step an existing one already matches is a duplicate: it makes the suite ambiguous, or in pytest-bdd silently overrides the other. The new code must reuse the existing definition;
+- steps that more than one feature uses live in one shared place (`features/steps/common/`, the acceptance tests' `conftest.py`, a shared binding class), not in one feature's steps file;
 - per-scenario state lives in the runner's context, never in module-level or static variables;
 - there are no narration comments, dead helpers or copy-pasted setup;
 - names come from the glossary.
@@ -98,6 +99,7 @@ Only blockers and majors send the work back.
   - nondeterminism: wall-clock time, sleeps, order dependence, shared data, a real external service;
   - test-only behavior that the scenario doesn't state;
   - a wrong coverage targets list;
+  - a step definition that duplicates or overlaps an existing one;
   - duplication or logic in step definitions that will make the suite hard to maintain.
 - **Minor / nit:** naming, structure polish, readability preferences.
 

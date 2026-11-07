@@ -181,6 +181,10 @@ The checker reads the glossary that `.claude/atdd.json` names (or `GLOSSARY.md` 
 
 Add `--json` for machine-readable output.
 
+**One file at a time.** `--files <name> ...` checks only the named `.feature` files of the folder against its ledger: full structure checks on them, and every requirement tag they use must exist in the ledger. Requirements that none of them covers are listed as information (`selection.uncoveredRequirements` in the JSON), not errors, because the area's other files cover them. `/atdd:cover-queue` checks each unit this way.
+
+**From a commit.** `--ref <branch-or-commit>` reads the folder, the ledger and the glossary from that commit instead of the working tree; paths are then relative to the repo root. Use it to check scenarios on a branch you haven't checked out.
+
 ## 9. Review checklist and severities
 
 Use this when reviewing Gherkin (yours or someone else's). Only **blocker** and **major** findings send work back. Everything else is advice.
