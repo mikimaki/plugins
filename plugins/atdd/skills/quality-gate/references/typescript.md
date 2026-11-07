@@ -79,3 +79,14 @@ Add `vitest.config.*` to `lockedPaths`, since it now holds coverage settings. Vi
 - **Mutation:** `stryker run --mutate <changed production files> --incremental --incrementalFile .atdd/cache/stryker-incremental.json`. The score counts only mutants on changed lines.
 - **Architecture:** `depcruise <sourceDirs> -T json`. The gate reads `summary.error` rather than the exit code, which wraps around at 256.
 - **Dead code:** `knip --reporter json`, filtered to items on added lines, plus unused files this change added.
+
+## Cover mode (/atdd:cover)
+
+Verified in November 2026 with StrykerJS 10.1.1 and Cucumber 13.3 on a sample repo.
+
+- **Acceptance coverage:** `commands.acceptanceTests` alone, with `ATDD_COVERAGE_DIR` and `NODE_V8_COVERAGE` set, then `node scripts/atdd/coverage.mjs merge`, as in full mode but without the unit tests.
+- **Acceptance mutation:** `stryker run --testRunner command --commandRunner.command "<commands.acceptanceTests>" --mutate <targets> --incremental --incrementalFile .atdd/cache/stryker-acceptance-incremental.json`. The JSON report goes where `stryker.config.json` puts it (`gate.mutationReport`).
+  - The command runner runs the whole acceptance suite for every mutant, so expect minutes rather than seconds. Incremental mode makes later rounds faster.
+  - It can't tell which mutants no scenario runs, so they show up as `Survived`; `target-uncovered.txt` from the coverage check names those lines.
+  - `@stryker-mutator/cucumber-runner` 10.1 would be faster, but it doesn't work with Cucumber 13: it passes its formatter as an unquoted `file:` URL, which Cucumber 13 splits at the colon ("Failed to import formatter file").
+  - With `gate.acceptanceRunner` set to `playwright-bdd`, the check is `skipped` unless `gate.commands.acceptanceMutation` is set.

@@ -6,7 +6,10 @@
 
 Does nothing for the main session, for other agents, and in repos without .claude/atdd.json.
 For atdd agents it enforces who may write where and which git commands they may run, and
-it gates the implementer's commits on locked files and the repo's fast checks.
+it gates the implementer's commits on locked files and the repo's fast checks. The
+acceptance-test-coverer (/atdd:cover) writes only inside the test paths, and its commits are
+gated on locked files, on nothing outside the test paths having changed, and on the cover
+fast checks.
 """
 
 from __future__ import annotations
@@ -21,9 +24,13 @@ import time
 from pathlib import Path
 
 IMPLEMENTER = "atdd:implementer"
+COVERER = "atdd:acceptance-test-coverer"
 PREPARER = "atdd:preparer"
 GHERKIN_WRITER = "atdd:gherkin-writer"
-READ_ONLY = {"atdd:gherkin-reviewer", "atdd:reviewer", "atdd:qa", "atdd:quality-tester", GHERKIN_WRITER}
+READ_ONLY = {"atdd:gherkin-reviewer", "atdd:reviewer", "atdd:qa", "atdd:quality-tester", GHERKIN_WRITER,
+             "atdd:coverage-reviewer", "atdd:coverage-qa", "atdd:coverage-quality-tester"}
+COMMITTERS = {IMPLEMENTER: "the implementer", COVERER: "the acceptance-test-coverer"}
+DEFAULT_COVER_FAST_CHECKS = "python3 scripts/atdd/gate.py cover-fast"
 
 GIT_READ_COMMANDS = {
     "status", "diff", "log", "show", "blame", "rev-parse", "ls-files", "grep", "merge-base", "describe",
@@ -31,10 +38,10 @@ GIT_READ_COMMANDS = {
     "reflog", "help", "version", "count-objects", "var", "whatchanged", "range-diff", "annotate",
 }
 GIT_GLOBAL_OPTS_WITH_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env"}
-IMPLEMENTER_FORBIDDEN = {
+COMMITTER_FORBIDDEN = {
     "push": "Pushing is the human's call once the pipeline is done.",
     "rebase": "Rewriting history breaks the pipeline's diffs.",
-    "merge": "Merging other branches isn't part of implementing this issue.",
+    "merge": "Merging other branches isn't part of this issue's work.",
     "pull": "Pulling changes the base under the pipeline.",
     "cherry-pick": "Bring code in by writing it for this issue.",
     "switch": "Stay on the issue branch.",
@@ -99,6 +106,20 @@ def is_locked(path: str, config: dict) -> bool:
     return any(matches(path, p) for p in config.get("lockedPaths", []))
 
 
+def cover_test_paths(config: dict) -> list[str]:
+    """Globs for the files a cover run may change: cover.testPaths, else every gate.testDirs folder plus featuresDir.
+    The quality gate (skills/quality-gate/scripts/gate.py) resolves them the same way."""
+    configured = (config.get("cover") or {}).get("testPaths")
+    if configured:
+        return [str(p).strip() for p in configured if str(p).strip()]
+    folders = list((config.get("gate") or {}).get("testDirs", [])) + [config.get("featuresDir", "")]
+    return sorted({f"{f}/**" for f in (str(d).strip().strip("/") for d in folders) if f and f != "."})
+
+
+def in_test_paths(path: str, config: dict) -> bool:
+    return any(matches(path, p) for p in cover_test_paths(config))
+
+
 def relative_to_root(raw: str, cwd: str, root: Path) -> str | None:
     target = Path(raw)
     if not target.is_absolute():
@@ -119,14 +140,24 @@ def check_edit(agent: str, data: dict, root: Path, config: dict) -> int:
         return allow()
     in_workspace = path == ".atdd" or path.startswith(".atdd/")
 
+    if agent in COMMITTERS and is_locked(path, config):
+        return deny(
+            f"{path} is locked (lockedPaths in .claude/atdd.json): the approved scenarios, the requirements "
+            "ledger, the quality-gate scripts and threshold configs belong to humans. If one of them is wrong, "
+            "stop and report blocked with your reasoning."
+        )
     if agent == IMPLEMENTER:
-        if is_locked(path, config):
-            return deny(
-                f"{path} is locked (lockedPaths in .claude/atdd.json): the approved scenarios, the requirements "
-                "ledger, the quality-gate scripts and threshold configs belong to humans. If one of them is wrong, "
-                "stop and report blocked with your reasoning."
-            )
         return allow()
+
+    if agent == COVERER:
+        if in_workspace or in_test_paths(path, config):
+            return allow()
+        return deny(
+            f"{path} is outside the test paths ({', '.join(cover_test_paths(config)) or 'none configured'}). "
+            "/atdd:cover only adds acceptance tests: production code, configuration, build files and manifests stay "
+            "exactly as they are. If covering a scenario needs a change there (a seam, a package), stop and report "
+            "blocked, naming what a human would have to change."
+        )
 
     if agent == GHERKIN_WRITER:
         features = str(config.get("featuresDir", "")).strip("/")
@@ -179,10 +210,7 @@ def changed_paths(root: Path) -> list[str]:
     return paths
 
 
-def run_fast_checks(root: Path, config: dict) -> int:
-    command = (config.get("commands") or {}).get("fastChecks")
-    if not command:
-        return deny("commands.fastChecks is missing from .claude/atdd.json, so the commit can't be checked. Report blocked; a human must run /atdd:init.")
+def run_fast_checks(root: Path, command: str) -> int:
     log_dir = root / ".atdd" / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"fast-checks-{time.strftime('%Y%m%d-%H%M%S')}-{int(time.time() * 1000) % 1000:03d}.log"
@@ -201,17 +229,18 @@ def run_fast_checks(root: Path, config: dict) -> int:
     )
 
 
-def check_implementer_git(invocations: list[list[str]], root: Path, config: dict) -> int:
+def check_committer_git(agent: str, invocations: list[list[str]], root: Path, config: dict) -> int:
+    role = COMMITTERS[agent]
     commits = False
     for subcommand, *rest in invocations:
-        if subcommand in IMPLEMENTER_FORBIDDEN:
-            return deny(f"git {subcommand} isn't allowed for the implementer. {IMPLEMENTER_FORBIDDEN[subcommand]}")
+        if subcommand in COMMITTER_FORBIDDEN:
+            return deny(f"git {subcommand} isn't allowed for {role}. {COMMITTER_FORBIDDEN[subcommand]}")
         if subcommand == "reset" and any(flag in rest for flag in ("--hard", "--soft", "--keep", "--merge")):
-            return deny("git reset with --hard/--soft/--keep/--merge isn't allowed for the implementer; make a new commit that undoes what you need to undo.")
+            return deny(f"git reset with --hard/--soft/--keep/--merge isn't allowed for {role}; make a new commit that undoes what you need to undo.")
         if subcommand == "checkout" and any(flag in rest for flag in ("-b", "-B", "--orphan", "--detach")):
-            return deny("Stay on the issue branch; creating or detaching branches isn't allowed for the implementer.")
+            return deny(f"Stay on the issue branch; creating or detaching branches isn't allowed for {role}.")
         if subcommand == "branch" and (set(rest) & BRANCH_WRITE_FLAGS or (rest and not rest[0].startswith("-"))):
-            return deny("Creating, renaming or deleting branches isn't allowed for the implementer.")
+            return deny(f"Creating, renaming or deleting branches isn't allowed for {role}.")
         if subcommand == "commit":
             if "--amend" in rest:
                 return deny("Don't amend: the pipeline tracks each round's commit. Make a new commit instead.")
@@ -219,7 +248,8 @@ def check_implementer_git(invocations: list[list[str]], root: Path, config: dict
     if not commits:
         return allow()
 
-    locked = [p for p in changed_paths(root) if is_locked(p, config)]
+    dirty = changed_paths(root)
+    locked = [p for p in dirty if is_locked(p, config)]
     if locked:
         listing = "\n".join(f"  {p}" for p in locked)
         return deny(
@@ -227,7 +257,21 @@ def check_implementer_git(invocations: list[list[str]], root: Path, config: dict
             f"(git restore <path>, or delete new files there) and commit again:\n{listing}\n"
             "If one of them really is wrong, stop and report blocked with your reasoning instead."
         )
-    return run_fast_checks(root, config)
+    commands = config.get("commands") or {}
+    if agent == COVERER:
+        outside = [p for p in dirty if not in_test_paths(p, config) and not p.startswith(".atdd/")]
+        if outside:
+            listing = "\n".join(f"  {p}" for p in outside)
+            return deny(
+                "Commit refused: /atdd:cover changes nothing but tests, and these files outside the test paths "
+                f"({', '.join(cover_test_paths(config)) or 'none configured'}) are modified or new. Revert them "
+                f"(git restore <path>; delete files you created) and commit again:\n{listing}\n"
+                "If covering a scenario really needs one of them changed, stop and report blocked instead."
+            )
+        return run_fast_checks(root, commands.get("coverFastChecks") or DEFAULT_COVER_FAST_CHECKS)
+    if not commands.get("fastChecks"):
+        return deny("commands.fastChecks is missing from .claude/atdd.json, so the commit can't be checked. Report blocked; a human must run /atdd:init.")
+    return run_fast_checks(root, commands["fastChecks"])
 
 
 def check_preparer_git(invocations: list[list[str]], root: Path, config: dict) -> int:
@@ -271,8 +315,8 @@ def check_git(agent: str, data: dict, root: Path, config: dict) -> int:
     invocations = git_invocations(command)
     if not invocations:
         return allow()
-    if agent == IMPLEMENTER:
-        return check_implementer_git(invocations, root, config)
+    if agent in COMMITTERS:
+        return check_committer_git(agent, invocations, root, config)
     if agent == PREPARER:
         return check_preparer_git(invocations, root, config)
     if agent in READ_ONLY:

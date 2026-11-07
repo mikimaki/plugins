@@ -108,7 +108,7 @@ const REVIEW = {
 const isBlocking = f => f.severity === 'blocker' || f.severity === 'major'
 const json = value => JSON.stringify(value, null, 2)
 
-// /atdd:build refuses to start while the ledger lists open questions, so one the spec already answers is a blocker in disguise.
+// /atdd:build and /atdd:cover refuse to start while the ledger lists open questions, so one the spec already answers is a blocker in disguise.
 const answerableQuestions = review => (review.openQuestions || [])
   .filter(q => q.verdict === 'answerable-from-spec')
   .map((q, i) => ({
@@ -162,9 +162,9 @@ function reviewerPrompt(prep, round, previousBlocking, draft) {
 function finish(status, prep, round, draft, review, outstanding) {
   const openQuestions = draft ? draft.openQuestions : []
   const next = {
-    approved: `Read the scenarios (git diff -- ${prep.featureDir}), edit anything you disagree with, then run /atdd:build ${ref}.`,
-    'open-questions': `The scenarios are approved, but the spec has open questions. Answer them in the spec (and re-run /atdd:gherkin ${ref}) or edit the ledger and scenarios yourself; /atdd:build refuses to start while the ledger lists open questions.`,
-    'needs-human': `The writer and reviewer didn't converge in ${round} round(s). Read the outstanding findings, fix or overrule them in ${prep.featureDir}, then re-run /atdd:gherkin ${ref} or go straight to /atdd:build ${ref}.`,
+    approved: `Read the scenarios (git diff -- ${prep.featureDir}), edit anything you disagree with, then run /atdd:build ${ref} to build the behavior, or /atdd:cover ${ref} if the code already has it and only needs acceptance tests.`,
+    'open-questions': `The scenarios are approved, but the spec has open questions. Answer them in the spec (and re-run /atdd:gherkin ${ref}) or edit the ledger and scenarios yourself; /atdd:build and /atdd:cover refuse to start while the ledger lists open questions.`,
+    'needs-human': `The writer and reviewer didn't converge in ${round} round(s). Read the outstanding findings, fix or overrule them in ${prep.featureDir}, then re-run /atdd:gherkin ${ref} or go straight to /atdd:build ${ref} (or /atdd:cover ${ref} for behavior the code already has).`,
   }[status]
   return {
     status,

@@ -1,6 +1,6 @@
 ---
 name: quality-gate
-description: The atdd plugin's deterministic quality gate, a Python script that /atdd:init installs into each repo as scripts/atdd/gate.py. Covers what each check measures (build analyzers, lint, tests, unbound steps, cyclomatic, cognitive and NPath complexity, dependency cycles between namespaces or projects, line and branch coverage of changed code, mutation testing, duplication, architecture rules, dead code, vulnerable dependencies, suppressions, locked files), how to run it, how to read report.json, and how to turn failures into actionable findings. Also covers per-stack setup for .NET, TypeScript, Next.js (React, Prisma, MySQL) and Python. Use whenever running, interpreting, setting up or tuning the atdd quality gate, or explaining why it failed.
+description: The atdd plugin's deterministic quality gate, a Python script that /atdd:init installs into each repo as scripts/atdd/gate.py. Covers what each check measures (build analyzers, lint, tests, unbound steps, cyclomatic, cognitive and NPath complexity, dependency cycles between namespaces or projects, line and branch coverage of changed code, mutation testing, duplication, architecture rules, dead code, vulnerable dependencies, suppressions, locked files), its cover mode for /atdd:cover (nothing outside the test paths changed, test-code quality, the acceptance tests' own coverage and mutation score on the production code they protect), how to run it, how to read report.json, and how to turn failures into actionable findings. Also covers per-stack setup for .NET, TypeScript, Next.js (React, Prisma, MySQL) and Python. Use whenever running, interpreting, setting up or tuning the atdd quality gate, or explaining why it failed.
 ---
 
 # The quality gate
@@ -21,12 +21,15 @@ When the plugin's gate changes, copy the new `scripts/gate.py` over the repo's `
 python3 scripts/atdd/gate.py fast             # the commit gate (the implementer's commit hook runs this)
 python3 scripts/atdd/gate.py full             # the full gate (the quality-tester runs this)
 python3 scripts/atdd/gate.py full --only mutation,diff-coverage
+python3 scripts/atdd/gate.py cover-fast       # /atdd:cover's commit gate (the coverer's commit hook runs this)
+python3 scripts/atdd/gate.py cover-full       # /atdd:cover's full gate (the coverage-quality-tester runs this)
 ```
 
 **Environment variables:**
 - `ATDD_BASE`: the diff base. Defaults to the merge-base with `baseBranch`.
 - `ATDD_OUT`: the output directory. Defaults to `.atdd/quality/latest`, and is cleared on every run.
 - `ATDD_SCENARIOS_COMMIT`: the commit holding the approved scenarios, used by the locked-files check.
+- `ATDD_COVER_TARGETS`: cover modes only. A file listing, one per line, the production files the acceptance tests protect.
 
 The gate exits 1 if any check fails. Its stdout ends with a summary of the failures. Everything else goes to `<out>/`.
 
@@ -133,6 +136,47 @@ A gate that passes while measuring nothing is worse than no gate. These guards a
 - **A crashing check** fails.
 - **Stale results:** the output directory is wiped at the start of every run, so leftovers from earlier runs can't count.
 
+## Cover mode
+
+`/atdd:cover` adds acceptance tests to code that already exists and may change nothing else. Its changes are tests only, so the gate judges them differently:
+
+- **The test code is what gets measured.** `complexity`, `cognitive`, `npath` and `dead-code` look at the changed test code in the cover modes, where they'd look at production code otherwise. `format`, `lint`, `duplication` and `suppressions` cover test files in every mode.
+- **Production code isn't judged at all.** `dependency-cycles`, `architecture`, `diff-coverage`, `mutation` and `vulnerabilities` don't run. So a repo whose existing code has dependency cycles can be covered with acceptance tests before anyone breaks the cycles, and should be: the tests are what make breaking them safe.
+- **Three checks exist only in cover mode:**
+
+| Check | Measures | Fails when |
+|---|---|---|
+| `production-untouched` | every file that differs from the base, committed or not (added, modified, deleted, both sides of a rename, untracked), against the test paths | any file outside the test paths differs, or the test paths are missing or would match production files |
+| `acceptance-coverage` | runs the acceptance tests alone with coverage, and reports the lines and branches of the coverage targets they never run | a target is missing from the report, or no acceptance test runs a single line of it; gaps are `warn` |
+| `acceptance-mutation` | mutates the coverage targets and runs only the acceptance tests against each mutant | the run crashes or writes no report; mutants they don't notice are `warn` |
+
+**The test paths** are `cover.testPaths` in `.claude/atdd.json` (globs), or else every `gate.testDirs` folder plus `featuresDir`. `scripts/atdd_guard.py` uses the same paths to keep the acceptance-test-coverer's edits and commits inside them.
+
+**Which checks run in each cover mode** comes from `gate.coverFast` / `gate.coverFull`. When unset:
+
+- `cover-fast`: production-untouched, build, format, lint, tests, undefined-steps, complexity, cognitive, npath, suppressions.
+- `cover-full`: those, plus duplication, locked-files, acceptance-coverage and acceptance-mutation.
+
+**Why coverage and mutation gaps warn instead of failing.** A target line no scenario runs, or a mutant no scenario notices, means one of two things:
+
+- a scenario claims that behavior, and its step definitions go around the real code or assert less than the Then states. The coverer has to fix that;
+- no scenario claims it. That's a gap in the spec, and only a human can add scenarios.
+
+A threshold can't tell the two apart; the coverage-quality-tester can.
+
+**Acceptance tests alone.** Unit tests often get rewritten in a refactoring; the acceptance tests are meant to survive it, so they are measured on their own:
+
+| Stack | acceptance-coverage | acceptance-mutation |
+|---|---|---|
+| .NET | `<commands.acceptanceTests> --collect:"XPlat Code Coverage;Format=cobertura"` | `dotnet stryker --solution <sln> -m "**/<target file name>" … --test-case-filter "<gate.acceptanceTestFilter>"`, default filter `FullyQualifiedName~Acceptance` |
+| TypeScript | `commands.acceptanceTests` with `NODE_V8_COVERAGE`, merged by `coverage.mjs` | StrykerJS's command runner with `commands.acceptanceTests` over the targets; `skipped` with playwright-bdd, as for Next.js |
+| Next.js | `commands.acceptanceTests` (server and browser coverage), merged by `coverage.mjs` | `skipped`: every mutant would need its own production build |
+| Python | `python3 -m pytest <acceptanceTestsDir> --cov=<sourceDirs> --cov-branch` | mutmut over the target modules, with a pytest plugin from the gate that deselects every test outside `acceptanceTestsDir` |
+
+Overrides: `gate.commands.acceptanceCoverage` with `gate.acceptanceCoverageReports` (Cobertura globs), and `gate.commands.acceptanceMutation` with `gate.acceptanceMutationReport` (a Stryker JSON report). A Python override must leave mutmut's results for `mutmut results`. The per-stack references have the details.
+
+**Coverage targets** are the production files whose behavior the scenarios pin down. The acceptance-test-coverer writes them to `.atdd/<issue-key>/cover/targets.txt`, and the coverage reviewer checks they're honest.
+
 ## Reading the results
 
 | File in `<out>/` | Contents |
@@ -145,6 +189,8 @@ A gate that passes while measuring nothing is worse than no gate. These guards a
 | `uncovered-branches.txt` | `file:line: n of m branches taken` for changed lines with branches no test takes |
 | `mutation-survivors.txt` | `file:line: mutator -> replacement [Survived/NoCoverage]`; for Python, mutmut mutant names (`mutmut show <name>`) |
 | `jscpd/jscpd-report.json` | clone pairs |
+| `target-coverage.json`, `target-uncovered.txt` | cover mode: per target file, lines and branches run by the acceptance tests, and the ones never run |
+| `acceptance-mutation-survivors.txt` | cover mode: mutants in the targets the acceptance tests didn't notice, as `file:line: mutator -> replacement [Survived/NoCoverage]`, or for Python mutmut names, with each diff in `logs/acceptance-mutation-diffs.log` |
 | `lint.json`, `cognitive.json`, `diff-cover.json` | raw tool reports |
 
 ## Turning failures into findings
@@ -174,6 +220,8 @@ The implementer gets your findings, not the logs. Write each one so it can be fi
 - **locked-files.** List the files. They must be reverted. If the implementer believes one is wrong, that's a question for a human.
 - **undefined-steps / tests.** Name the failing scenario or test and quote the first assertion message.
 - **A `warn` on vulnerabilities**, or a `skipped` because rules aren't configured, is a minor finding addressed to a human, not to the implementer.
+- **production-untouched** (cover mode). List the files. They must be reverted, or deleted if the change created them; a change outside the test paths is never the coverer's to make.
+- **acceptance-coverage / acceptance-mutation** (cover mode). Judge each gap rather than reporting the metric: if a scenario claims the behavior, the gap is a major for the coverer (a step that goes around the real path, or asserts less than its Then); if no scenario claims it, it's a spec gap, a minor finding for a human. Group gaps by behavior.
 
 ## Setting the gate up in a repo
 
@@ -202,3 +250,10 @@ The gate itself reads `gate.thresholds`, and hands `cognitive` and `npath` to `e
    - **TypeScript:** `eslint-npath.mjs`, the new `eslint.quality.mjs`, `coverage.mjs` and `cobertura-reporter.mjs` to `scripts/atdd/`; then switch coverage from c8 to Monocart as `references/typescript.md` describes.
    - **Python:** nothing; `gate.py` computes NPath and the import graph itself.
 4. Run `python3 scripts/atdd/gate.py fast --only npath,dependency-cycles` and `python3 scripts/atdd/gate.py full --only diff-coverage`. Existing dependency cycles fail every run from now on, including the implementer's commit hook: break them in a separate change before the next `/atdd:build`.
+
+## Upgrading a repo for /atdd:cover
+
+1. Copy `scripts/gate.py` over `scripts/atdd/gate.py`. The `/atdd:cover` preparer refuses to start until `gate.py --help` lists `cover-fast` and `cover-full`.
+2. In `.claude/atdd.json`, check that `gate.testDirs` names the folders where acceptance tests may be added, and nothing else. Set `cover.testPaths` (globs) to narrow it, for example to the acceptance test project alone. Make sure `commands.acceptanceTests` is set.
+3. Optionally add `"coverFastChecks": "python3 scripts/atdd/gate.py cover-fast"` and `"coverGate": "python3 scripts/atdd/gate.py cover-full"` to `commands`, and `"coverRounds": 5` to `limits`. Those are the defaults.
+4. Commit it all on the base branch, then run `python3 scripts/atdd/gate.py cover-fast` once to see that nothing reports a missing tool.

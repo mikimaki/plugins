@@ -44,3 +44,14 @@ The acceptance tests must bind every scenario with `pytest_bdd.scenarios(...)`. 
 - **Architecture:** `lint-imports`. Skipped until `[tool.importlinter]` exists.
 - **Dead code:** `vulture <sourceDirs> <testDirs> --min-confidence 60`. Scanning the tests too means test usages count. Only items on added lines in production code are reported. Put genuine dynamic uses in `vulture_whitelist.py` (a locked file, so a human adds them).
 - **Vulnerabilities:** `pip-audit` (the active environment). Override with `pip-audit -r requirements.txt` or `pip-audit .` via `gate.commands.vulnerabilities`.
+
+## Cover mode (/atdd:cover)
+
+Verified in November 2026 with mutmut 3.8.1, pytest-bdd 9 and pytest-cov on a sample repo.
+
+- **Acceptance coverage:** `python3 -m pytest --ignore=mutants <acceptanceTestsDir> --cov=<sourceDirs> --cov-branch --cov-report=xml:<out>/acceptance-coverage/coverage.xml` (`gate.commands.pytest` replaces the `python3 -m pytest --ignore=mutants` part).
+- **Acceptance mutation:** `mutmut run "<module>.*"` for each target module. mutmut's test selection lives in the locked `pyproject.toml`, so the gate narrows it from outside:
+  - it writes a small pytest plugin to `.atdd/cache/acceptance-only/`, which deselects every test outside `gate.acceptanceTestsDir`;
+  - it loads the plugin through `PYTEST_ADDOPTS` and `PYTHONPATH`.
+  - The gate reads `mutmut results --all true` and counts only mutants in the target modules; each undetected one's diff (`mutmut show`) goes to `logs/acceptance-mutation-diffs.log`.
+  - mutmut's cache in `mutants/` records which tests cover which function and doesn't know about the plugin, so the gate deletes `mutants/` before and after this check. A later `full` run rebuilds it.

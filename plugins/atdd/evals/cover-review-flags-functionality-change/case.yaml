@@ -1,0 +1,11 @@
+schema_version: "1.1"
+name: cover-review-flags-functionality-change
+context:
+  scaffold_script: place-files.sh
+expected_outcome: |
+  A review that refuses the merge, with the production change as its most severe finding: the commit rewrote the
+  refusal message in src/stepgoals/goals.py to match the scenario, which changes what the platform does, and the
+  mismatch should have gone to a human as a discrepancy instead. It also flags the edited unit test, the hollow
+  "still has no daily step goal" step, the patched celebrations service (faking the system under test), the read of the
+  private _goals dict, and the sleep and wall-clock date in the sync step. It asks for no refactoring of production
+  code, such as the badly named proc() helper.

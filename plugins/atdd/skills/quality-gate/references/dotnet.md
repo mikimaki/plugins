@@ -93,4 +93,13 @@ public class LayeringTests
   - `--since` needs the base commit locally. In CI, fetch enough history (`fetch-depth: 0`).
 - **Vulnerabilities:** `dotnet package list --vulnerable --include-transitive --format json` on SDK 10+, falling back to `dotnet list package` on older SDKs. Both exit 0 even when they find vulnerabilities, so the gate counts the findings in the JSON itself.
 
+## Cover mode (/atdd:cover)
+
+- **Acceptance coverage:** `<commands.acceptanceTests> --collect:"XPlat Code Coverage;Format=cobertura" --results-directory <out>/acceptance-coverage/test-results`, so `commands.acceptanceTests` must be a plain `dotnet test <acceptance test project>`. On Microsoft.Testing.Platform, set `gate.commands.acceptanceCoverage` and `gate.acceptanceCoverageReports` the way `testsWithCoverage` is set above.
+- **Acceptance mutation:** `dotnet stryker --solution <sln> -m "**/<file name>" … --test-case-filter "<filter>" -r json … -O <out>/acceptance-stryker`.
+  - The filter, `gate.acceptanceTestFilter`, defaults to `FullyQualifiedName~Acceptance`: the same convention as the template's `commands.unitTests`.
+  - `-m` matches file names, so a same-named file in another project is mutated too. The gate only counts mutants in the targets, so that costs time but doesn't skew the result.
+  - The xUnit v3 and TUnit runners on Microsoft.Testing.Platform don't support `--test-case-filter`; set `gate.commands.acceptanceMutation` for them.
+- Neither has run against a real solution yet; read `logs/acceptance-coverage.log` and `logs/acceptance-mutation.log` after the first run.
+
 **Not verified end-to-end:** the .NET path was written against current docs and tool source. It wasn't run against a real solution with NuGet packages while this plugin was built. The NPath and dependency-cycle checks were run against a sample solution on SDK 8.0.133 and 10.0.114, and the branch counting against coverlet-format reports written by hand. The first time you run `/atdd:init` and the gate in a .NET repo, read `.atdd/quality/latest/logs/*.log` once to confirm every tool ran as expected, `tests.log` in particular.

@@ -9,7 +9,7 @@
     {
       "name": "atdd",
       "source": "./plugins/atdd",
-      "description": "Gherkin-first ATDD pipeline: gherkin writer ⇄ reviewer, then implementer → reviewer → QA → quality gate, looping until clean."
+      "description": "Gherkin-first ATDD pipeline: gherkin writer ⇄ reviewer, then implementer → reviewer → QA → quality gate, looping until clean; or cover existing behavior with acceptance tests, changing nothing else."
     }
   ]
 }

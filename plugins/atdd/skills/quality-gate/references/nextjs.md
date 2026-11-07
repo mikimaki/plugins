@@ -88,6 +88,11 @@ Everything in `typescript.md` applies, with these differences:
 
 A full run builds the app and runs the browser tests, so expect several minutes; mutation testing adds more.
 
+**Cover mode (/atdd:cover):**
+
+- **Acceptance coverage:** `commands.acceptanceTests` alone with `ATDD_COVERAGE_DIR` set, so the server and the browser record coverage as in full mode, then `node scripts/atdd/coverage.mjs merge`.
+- **Acceptance mutation** is `skipped`: every mutant would need its own production build. Set `gate.commands.acceptanceMutation` (and `gate.acceptanceMutationReport`) to run it anyway. The coverage check's gaps and the coverage-quality-tester's review of the step definitions are what judge the scenarios here.
+
 ## What 100% coverage asks of a Next.js app
 
 - **Every changed line and branch must run in some test.** Code that only runs in one environment, such as `if (process.env.NODE_ENV !== 'production')` around the Prisma client cache, can never be covered by tests that run the production build. Write it without the branch (`globalThis.prisma ??= new PrismaClient(…)` works in every environment), or keep it out of `src/`.

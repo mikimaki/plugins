@@ -4,6 +4,9 @@
     python3 scripts/atdd/gate.py fast    # commit gate: build, format, lint, tests, steps, complexity, NPath, cycles, suppressions
     python3 scripts/atdd/gate.py full    # adds diff coverage, mutation, duplication, architecture, dead code, ...
     python3 scripts/atdd/gate.py full --only mutation,diff-coverage
+    python3 scripts/atdd/gate.py cover-fast   # /atdd:cover's commit gate: only test files changed, and they're sound
+    python3 scripts/atdd/gate.py cover-full   # adds duplication, locked files, and the acceptance tests' own coverage and
+                                              # mutation score on the production files they protect
 
 /atdd:init installs this script into each repo as scripts/atdd/gate.py, a locked file. Its source is
 skills/quality-gate/scripts/gate.py in the atdd plugin; to update a repo, copy that over and commit it.
@@ -11,7 +14,12 @@ skills/quality-gate/scripts/gate.py in the atdd plugin; to update a repo, copy t
 Configuration lives in .claude/atdd.json ("stack", "baseBranch", "featuresDir", "lockedPaths", "gate").
 Environment overrides: ATDD_BASE (diff base, default: merge-base with baseBranch), ATDD_OUT (report
 directory, default .atdd/quality/latest), ATDD_SCENARIOS_COMMIT (commit holding the approved scenarios,
-for the locked-files check). Writes <out>/report.json plus one log per check; exits 1 if any check fails.
+for the locked-files check), ATDD_COVER_TARGETS (cover-full: a file listing, one per line, the production files the
+acceptance tests protect). Writes <out>/report.json plus one log per check; exits 1 if any check fails.
+
+The cover modes judge a change that adds acceptance tests to existing code and must leave everything else alone, so
+they measure the test code instead of production code, never look at architecture or dependency cycles, and fail when
+any file outside the test paths (cover.testPaths, else gate.testDirs plus featuresDir) differs from the base.
 
 Standard library only; Python 3.9+. The tools it drives (lizard, diff-cover, jscpd, Stryker, ...) are
 installed per repo, see the atdd quality-gate skill. Python NPath and Python import cycles are computed here
@@ -56,6 +64,16 @@ FAST_CHECKS = ["build", "format", "lint", "tests", "undefined-steps", "complexit
                "dependency-cycles", "suppressions"]
 FULL_CHECKS = FAST_CHECKS + ["diff-coverage", "mutation", "duplication", "architecture", "dead-code",
                              "vulnerabilities", "locked-files"]
+COVER_FAST_CHECKS = ["production-untouched", "build", "format", "lint", "tests", "undefined-steps", "complexity",
+                     "cognitive", "npath", "suppressions"]
+COVER_FULL_CHECKS = COVER_FAST_CHECKS + ["duplication", "locked-files", "acceptance-coverage", "acceptance-mutation"]
+# mode -> (the key in .claude/atdd.json "gate" that can replace its checks, its default checks)
+MODES = {
+    "fast": ("fast", FAST_CHECKS),
+    "full": ("full", FULL_CHECKS),
+    "cover-fast": ("coverFast", COVER_FAST_CHECKS),
+    "cover-full": ("coverFull", COVER_FULL_CHECKS),
+}
 
 STACKS = {
     "dotnet": {
@@ -138,6 +156,7 @@ class Gate:
     coverage_reports: list = field(default_factory=list)
     coverlet_reports: list = field(default_factory=list)
     branches_measured: bool = False
+    cover_targets_file: str | None = None
     _functions: dict | None = None
 
     # ---------- helpers ----------
@@ -145,6 +164,15 @@ class Gate:
     @property
     def node(self) -> bool:
         return self.stack in NODE_STACKS
+
+    @property
+    def cover(self) -> bool:
+        """The cover modes judge acceptance tests added to existing code: the test code is what gets measured."""
+        return self.mode.startswith("cover")
+
+    @property
+    def subject(self) -> str:
+        return "test code" if self.cover else "production code"
 
     def log_path(self, name: str) -> Path:
         return self.out / "logs" / f"{name}.log"
@@ -214,6 +242,35 @@ class Gate:
         if include_tests:
             return files
         return [p for p in files if not self.is_test(p) and self.in_source_dirs(p)]
+
+    def subject_files(self) -> list:
+        """Changed code whose shape the gate judges: production code, or in the cover modes the tests being added."""
+        return self.code_files(include_tests=self.cover)
+
+    def in_test_paths(self, path: str) -> bool:
+        return any(path_matches(path, pattern) for pattern in cover_test_paths(self.config))
+
+    def targets(self) -> tuple:
+        """The production files a cover run protects, listed in ATDD_COVER_TARGETS: (paths, None) or (None, problem)."""
+        if not self.cover_targets_file:
+            return None, ("No coverage targets: set ATDD_COVER_TARGETS to a file listing, one per line, the production "
+                          "files that implement the behavior the scenarios describe.")
+        listing = Path(self.cover_targets_file)
+        listing = listing if listing.is_absolute() else self.root / listing
+        if not listing.is_file():
+            return None, f"The coverage targets file {self.rel(listing)} doesn't exist."
+        entries = [line.strip() for line in listing.read_text(encoding="utf-8").splitlines()]
+        targets = sorted({e[2:] if e.startswith("./") else e for e in entries if e and not e.startswith("#")})
+        if not targets:
+            return None, f"{self.rel(listing)} lists no files."
+        problems = []
+        missing = [t for t in targets if not (self.root / t).is_file()]
+        if missing:
+            problems.append("These coverage targets don't exist:\n" + "\n".join(missing))
+        tests = [t for t in targets if t not in missing and (self.in_test_paths(t) or self.is_test(t))]
+        if tests:
+            problems.append("Coverage targets are production files, never tests:\n" + "\n".join(tests))
+        return (None, "\n".join(problems)) if problems else (targets, None)
 
     def production_files(self) -> list:
         """Every production code file in sourceDirs, changed or not: tracked plus untracked, minus git-ignored."""
@@ -600,11 +657,11 @@ def check_undefined_steps(g: Gate, r: Result) -> None:
 
 
 def check_complexity(g: Gate, r: Result) -> None:
-    files = g.code_files()
+    files = g.subject_files()
     t = g.thresholds
     r.threshold = f"CCN ≤ {t['cyclomatic']}, NLOC ≤ {t['functionLength']}, params ≤ {t['parameters']}"
     if not files:
-        r.status, r.detail = "skipped", "No changed production code."
+        r.status, r.detail = "skipped", f"No changed {g.subject}."
         return
     if not g.has_tool("lizard"):
         r.status, r.detail = "fail", "lizard isn't installed (pip install lizard==1.24.3)."
@@ -634,7 +691,7 @@ def check_complexity(g: Gate, r: Result) -> None:
 
 
 def check_cognitive(g: Gate, r: Result) -> None:
-    files = g.code_files()
+    files = g.subject_files()
     limit = g.thresholds["cognitive"]
     r.threshold = f"≤ {limit} per function"
     override = g.command_override("cognitive")
@@ -655,7 +712,7 @@ def check_cognitive(g: Gate, r: Result) -> None:
             r.detail = "Measured by SonarAnalyzer S3776 during the build check (threshold in SonarLint.xml)."
         return
     if not files:
-        r.status, r.detail = "skipped", "No changed production code."
+        r.status, r.detail = "skipped", f"No changed {g.subject}."
         return
     quoted = " ".join(shlex.quote(f) for f in files)
     report = g.out / "cognitive.json"
@@ -1091,7 +1148,7 @@ def check_architecture(g: Gate, r: Result) -> None:
 
 
 def check_dead_code(g: Gate, r: Result) -> None:
-    files = g.code_files()
+    files = g.subject_files()
     override = g.command_override("deadCode")
     if override:
         code = g.run("dead-code", override)
@@ -1108,7 +1165,7 @@ def check_dead_code(g: Gate, r: Result) -> None:
             r.status, r.detail = "skipped", "IDE0051/IDE0052/IDE0060 aren't enabled in .editorconfig; unused code isn't detected."
         return
     if not files:
-        r.status, r.detail = "skipped", "No changed production code."
+        r.status, r.detail = "skipped", f"No changed {g.subject}."
         return
     hits = []
     if g.node:
@@ -1292,7 +1349,7 @@ def node_audit_command(g: Gate) -> str:
 # ---------- NPath ----------
 
 def check_npath(g: Gate, r: Result) -> None:
-    files = g.code_files()
+    files = g.subject_files()
     limit = g.thresholds["npath"]
     r.threshold = f"≤ {limit} per function"
     override = g.command_override("npath")
@@ -1303,7 +1360,7 @@ def check_npath(g: Gate, r: Result) -> None:
             r.status, r.detail = "fail", f"Functions over NPath {limit}:\n" + g.tail(g.log_path("npath"), 30)
         return
     if not files:
-        r.status, r.detail = "skipped", "No changed production code."
+        r.status, r.detail = "skipped", f"No changed {g.subject}."
         return
     try:
         if g.node:
@@ -1709,7 +1766,377 @@ def dotnet_dependency_graphs(g: Gate, production: list):
     return namespaces, projects
 
 
+# ---------- cover mode ----------
+
+# Paths that are production code in practically every repo: test paths matching one of them would let a cover run
+# change production code.
+PRODUCTION_PROBES = ("Program.cs", "package.json", "pyproject.toml", "src/main.py", "src/app/page.tsx",
+                     "src/App/Orders/OrderService.cs")
+
+ACCEPTANCE_ONLY_PLUGIN = '''"""pytest plugin written by the atdd gate: keeps only the tests under ATDD_ACCEPTANCE_DIR, so
+mutmut measures what the acceptance tests alone notice."""
+import os
+
+_DIR = os.environ.get("ATDD_ACCEPTANCE_DIR", "tests/acceptance").strip("/") + "/"
+
+
+def pytest_collection_modifyitems(config, items):
+    others = [item for item in items if not item.nodeid.startswith(_DIR)]
+    if others:
+        config.hook.pytest_deselected(items=others)
+        items[:] = [item for item in items if item.nodeid.startswith(_DIR)]
+'''
+
+MUTMUT_DETECTED = {"killed", "timeout", "caught by type check", "segfault"}
+MUTMUT_SURVIVED = {"survived", "suspicious"}
+
+
+def cover_test_paths(config: dict) -> list:
+    """Globs for the files a cover run may change: cover.testPaths, else every gate.testDirs folder plus featuresDir.
+    scripts/atdd_guard.py in the atdd plugin resolves them the same way."""
+    configured = (config.get("cover") or {}).get("testPaths")
+    if configured:
+        return [str(p).strip() for p in configured if str(p).strip()]
+    folders = list((config.get("gate") or {}).get("testDirs", [])) + [config.get("featuresDir", "")]
+    return sorted({f"{f}/**" for f in (str(d).strip().strip("/") for d in folders) if f and f != "."})
+
+
+def path_matches(path: str, pattern: str) -> bool:
+    """fnmatch, where * spans directories; "dir/" and "dir/**" also match the folder itself, "**/x" also matches x."""
+    pattern = pattern[2:] if pattern.startswith("./") else pattern
+    if pattern.endswith("/"):
+        pattern += "**"
+    candidates = {pattern}
+    if pattern.startswith("**/"):
+        candidates.add(pattern[3:])
+    if pattern.endswith("/**"):
+        candidates.add(pattern[:-3])
+    return any(fnmatch.fnmatchcase(path, p) for p in candidates)
+
+
+def touched_paths(root: Path, base: str) -> list:
+    """Every path that differs from base, committed or not: added, modified, deleted, both sides of a rename, untracked."""
+    tracked = git(root, "diff", "--name-only", "--no-renames", "-z", base).split("\0")
+    untracked = git(root, "ls-files", "--others", "--exclude-standard", "-z").split("\0")
+    return sorted({p for p in tracked + untracked if p})
+
+
+def check_production_untouched(g: Gate, r: Result) -> None:
+    patterns = cover_test_paths(g.config)
+    r.threshold = "0 files outside the test paths"
+    if not patterns:
+        r.status, r.detail = "fail", ("No test paths: set gate.testDirs (or cover.testPaths) in .claude/atdd.json, so the "
+                                     "gate knows which files a cover run may change.")
+        return
+    broad = [p for p in patterns if any(path_matches(probe, p) for probe in PRODUCTION_PROBES)]
+    if broad:
+        r.status, r.detail = "fail", (f"These test paths would match production files too: {', '.join(broad)}. Narrow "
+                                     "cover.testPaths or gate.testDirs in .claude/atdd.json.")
+        return
+    outside = [p for p in touched_paths(g.root, g.base) if not any(path_matches(p, pattern) for pattern in patterns)]
+    log = g.log_path("production-untouched")
+    log.write_text(f"test paths: {', '.join(patterns)}\n" + "".join(f"{p}\n" for p in outside), encoding="utf-8")
+    r.log = g.rel(log)
+    r.metric = f"{len(outside)} file(s) outside the test paths changed"
+    if outside:
+        r.status = "fail"
+        r.detail = ("A cover run may only add or change tests, but these files outside the test paths "
+                    f"({', '.join(patterns)}) differ from the base commit. Revert them, or delete them if this change "
+                    "created them. Production code, configuration, build files and manifests stay exactly as they are; "
+                    "a change there is a human's, made on the base branch:\n" + "\n".join(outside[:40]))
+
+
+def line_ranges(numbers) -> str:
+    ranges, start, previous = [], None, None
+    for n in sorted(numbers):
+        if start is None:
+            start = previous = n
+        elif n == previous + 1:
+            previous = n
+        else:
+            ranges.append(str(start) if start == previous else f"{start}-{previous}")
+            start = previous = n
+    if start is not None:
+        ranges.append(str(start) if start == previous else f"{start}-{previous}")
+    return ", ".join(ranges)
+
+
+def percent(part: int, whole: int) -> float:
+    return round(100.0 * part / whole, 1) if whole else 100.0
+
+
+def check_acceptance_coverage(g: Gate, r: Result) -> None:
+    r.threshold = "every target runs; each uncovered line or branch is judged"
+    targets, problem = g.targets()
+    if problem:
+        r.status, r.detail = "fail", problem
+        return
+    try:
+        reports, code = run_acceptance_with_coverage(g)
+    except GateError as error:
+        r.status, r.detail = "fail", str(error)
+        return
+    r.log = g.rel(g.log_path("acceptance-coverage"))
+    if code != 0:
+        r.status, r.detail = "fail", (f"The acceptance tests failed while their coverage was measured (exit {code}). If they "
+                                     "passed in the tests check, they're flaky (time, order or shared state):\n"
+                                     + g.tail(g.log_path("acceptance-coverage"), 25))
+        return
+    reports = [p for p in reports if Path(p).exists()]
+    if not reports:
+        r.status, r.detail = "fail", ("The acceptance tests wrote no coverage report:\n"
+                                     + g.tail(g.log_path("acceptance-coverage"), 20))
+        return
+    measured = target_coverage(g, reports, set(targets))
+    lines = sum(len(m["lines"]) for m in measured.values())
+    lines_run = sum(1 for m in measured.values() for hits in m["lines"].values() if hits)
+    branches = sum(total for m in measured.values() for _, total in m["branches"].values())
+    branches_taken = sum(covered for m in measured.values() for covered, _ in m["branches"].values())
+    uncovered, partial = [], []
+    for path, data in sorted(measured.items()):
+        idle = [n for n, hits in data["lines"].items() if not hits]
+        if idle:
+            uncovered.append(f"{path}: lines {line_ranges(idle)}")
+        partial += [f"{path}:{n}: {covered} of {total} branches taken"
+                    for n, (covered, total) in sorted(data["branches"].items()) if covered < total]
+    (g.out / "target-coverage.json").write_text(json.dumps(
+        {path: {"lines": len(d["lines"]), "linesRun": sum(1 for h in d["lines"].values() if h),
+                "uncoveredLines": sorted(n for n, h in d["lines"].items() if not h),
+                "branches": sum(t for _, t in d["branches"].values()),
+                "branchesTaken": sum(c for c, _ in d["branches"].values())} for path, d in sorted(measured.items())},
+        indent=2) + "\n", encoding="utf-8")
+    (g.out / "target-uncovered.txt").write_text("".join(f"{line}\n" for line in uncovered + partial), encoding="utf-8")
+    r.metric = (f"{percent(lines_run, lines)}% of {lines} target line(s), "
+                f"{percent(branches_taken, branches)}% of {branches} branch(es)")
+    missing = [t for t in targets if t not in measured]
+    never_run = [t for t in targets if t in measured and not any(measured[t]["lines"].values())]
+    if missing:
+        r.status, r.detail = "fail", ("These coverage targets are missing from the acceptance tests' coverage report: no "
+                                     "scenario loads them, or coverage leaves them out (outside gate.sourceDirs?):\n"
+                                     + "\n".join(missing))
+    elif never_run:
+        r.status, r.detail = "fail", ("No acceptance test runs a single line of these coverage targets. Either they don't "
+                                     "implement the scenarios' behavior (drop them from the targets) or the step "
+                                     "definitions go around them:\n" + "\n".join(never_run))
+    elif uncovered or partial:
+        r.status = "warn"
+        r.detail = ("Target code the acceptance tests never run. For each gap: if a scenario claims that behavior, its "
+                    "step definitions don't reach the real code path; if none does, it's behavior no scenario describes "
+                    "yet (a spec gap for a human):\n" + "\n".join((uncovered + partial)[:40]))
+
+
+def run_acceptance_with_coverage(g: Gate) -> tuple:
+    """Runs the acceptance tests alone while recording coverage. Returns (report paths, exit code)."""
+    out = g.out / "acceptance-coverage"
+    out.mkdir(parents=True, exist_ok=True)
+    acceptance = g.configured_command("acceptanceTests")
+    override = g.command_override("acceptanceCoverage")
+    if override:
+        code = g.run("acceptance-coverage", override, env={"ATDD_OUT": str(g.out)})
+        patterns = g.gate_config.get("acceptanceCoverageReports") or []
+        patterns = patterns if isinstance(patterns, list) else [patterns]
+        return sorted({p for pat in patterns for p in glob.glob(str(g.root / pat), recursive=True)}), code
+    if g.stack == "dotnet":
+        if not acceptance:
+            raise GateError("Set commands.acceptanceTests (dotnet test <acceptance test project>) in .claude/atdd.json, "
+                            "or gate.commands.acceptanceCoverage.")
+        results = out / "test-results"
+        code = g.run("acceptance-coverage", f"{acceptance} --collect:\"XPlat Code Coverage;Format=cobertura\" "
+                                            f"--results-directory {shlex.quote(str(results))}")
+        return sorted(glob.glob(str(results / "**" / "coverage.cobertura.xml"), recursive=True)), code
+    if g.node:
+        if not acceptance:
+            raise GateError("Set commands.acceptanceTests in .claude/atdd.json, or gate.commands.acceptanceCoverage.")
+        if not (g.root / "scripts" / "atdd" / "coverage.mjs").exists():
+            raise GateError("scripts/atdd/coverage.mjs is missing, so coverage can't be measured; run /atdd:init.")
+        env = {"ATDD_COVERAGE_DIR": str(out)}
+        if g.stack == "typescript" and not re.search(r"\bvitest\b", acceptance):
+            env["NODE_V8_COVERAGE"] = str(out / "node-v8")
+        code = g.run("acceptance-coverage", acceptance, env=env)
+        code = max(code, g.run("acceptance-coverage", "node scripts/atdd/coverage.mjs merge", append=True,
+                               env={"ATDD_COVERAGE_DIR": str(out)}))
+        return [str(out / "merged" / "cobertura-coverage.xml")], code
+    report = out / "coverage.xml"
+    base = g.command_override("pytest") or "python3 -m pytest --ignore=mutants"
+    acceptance_dir = g.gate_config.get("acceptanceTestsDir", "tests/acceptance")
+    cov = " ".join(f"--cov={shlex.quote(d)}" for d in g.gate_config.get("sourceDirs", [])) or "--cov=."
+    code = g.run("acceptance-coverage", f"{base} {shlex.quote(acceptance_dir)} {cov} --cov-branch "
+                                        f"--cov-report=xml:{shlex.quote(str(report))}")
+    return [str(report)], code
+
+
+def target_coverage(g: Gate, reports: list, targets: set) -> dict:
+    """{path: {"lines": {line: hits}, "branches": {line: (covered, total)}}} for the target files in Cobertura reports;
+    a line counts as run when any report ran it, and its branches come from the report that took most of them."""
+    measured = {}
+    for report in reports:
+        try:
+            root = ElementTree.parse(report).getroot()
+        except (OSError, ElementTree.ParseError):
+            continue
+        sources = [s.text.strip() for s in root.iter("source") if s.text and s.text.strip()]
+        for cls in root.iter("class"):
+            path = cobertura_path(g, cls.get("filename", ""), sources, targets)
+            if path not in targets:
+                continue
+            data = measured.setdefault(path, {"lines": {}, "branches": {}})
+            for line in cls.findall("./lines/line"):
+                number = int(line.get("number", "0"))
+                data["lines"][number] = max(data["lines"].get(number, 0), int(float(line.get("hits", "0"))))
+                match = re.search(r"\((\d+)/(\d+)\)", line.get("condition-coverage", ""))
+                if line.get("branch", "").lower() != "true" or not match or int(match.group(2)) == 0:
+                    continue
+                covered, total = int(match.group(1)), int(match.group(2))
+                previous = data["branches"].get(number)
+                if previous is None or covered * previous[1] > previous[0] * total:
+                    data["branches"][number] = (covered, total)
+    return measured
+
+
+def check_acceptance_mutation(g: Gate, r: Result) -> None:
+    r.threshold = "advisory: each mutant the acceptance tests miss is judged"
+    targets, problem = g.targets()
+    if problem:
+        r.status, r.detail = "fail", problem
+        return
+    override = g.command_override("acceptanceMutation")
+    runner = g.gate_config.get("acceptanceRunner", "playwright-bdd" if g.stack == "nextjs" else "cucumber")
+    if g.node and runner == "playwright-bdd" and not override:
+        r.status, r.detail = "skipped", ("The scenarios run in a browser against a production build, which would be rebuilt "
+                                         "for every mutant. Set gate.commands.acceptanceMutation to measure it anyway.")
+        return
+    if g.stack == "python":
+        python_acceptance_mutation(g, r, targets, override)
+        return
+    configured_report = g.gate_config.get("acceptanceMutationReport")
+    if g.stack == "dotnet":
+        solution = g.gate_config.get("solution", "")
+        if not solution and not override:
+            r.status, r.detail = "fail", "Set gate.solution in .claude/atdd.json so Stryker.NET knows what to mutate."
+            return
+        out = g.out / "acceptance-stryker"
+        shutil.rmtree(out, ignore_errors=True)
+        test_filter = g.gate_config.get("acceptanceTestFilter", "FullyQualifiedName~Acceptance")
+        mutate = " ".join(f"-m {shlex.quote('**/' + Path(t).name)}" for t in targets)
+        command = override or (
+            f"dotnet stryker --solution {shlex.quote(solution)} {mutate} --test-case-filter {shlex.quote(test_filter)} "
+            f"-r json -r cleartext -r progress -O {shlex.quote(str(out))}")
+        report = out / "reports" / "mutation-report.json"
+    else:
+        acceptance = g.configured_command("acceptanceTests")
+        if not acceptance and not override:
+            r.status, r.detail = "fail", ("Set commands.acceptanceTests in .claude/atdd.json, or "
+                                         "gate.commands.acceptanceMutation.")
+            return
+        report = g.root / g.gate_config.get("mutationReport", "reports/mutation/mutation.json")
+        incremental = g.root / ".atdd" / "cache" / "stryker-acceptance-incremental.json"
+        incremental.parent.mkdir(parents=True, exist_ok=True)
+        # The command runner runs the whole acceptance suite per mutant. StrykerJS's Cucumber runner would be faster,
+        # but 10.1 can't load its formatter in Cucumber 13, which splits the file: URL it passes at the colon.
+        command = override or (
+            f"npx --no-install stryker run --testRunner command --commandRunner.command {shlex.quote(acceptance)} "
+            f"--mutate {shlex.quote(','.join(glob_literal(t) for t in targets))} --reporters json,clear-text,progress "
+            f"--incremental --incrementalFile {shlex.quote(str(incremental))}")
+    if configured_report:
+        report = g.root / configured_report
+    report.unlink(missing_ok=True)
+    code = g.run("acceptance-mutation", command)
+    r.log = g.rel(g.log_path("acceptance-mutation"))
+    if not report.exists():
+        r.status, r.detail = "fail", (f"Mutation testing didn't produce a report (exit {code}):\n"
+                                     + g.tail(g.log_path("acceptance-mutation"), 25))
+        return
+    report_acceptance_mutants(g, r, stryker_target_mutants(report, set(targets)))
+
+
+def stryker_target_mutants(report: Path, targets: set) -> dict:
+    """Mutants in the target files of a mutation-testing-report-schema JSON (StrykerJS, Stryker.NET), on any line."""
+    data = json.loads(report.read_text(encoding="utf-8"))
+    summary = {"detected": 0, "survived": 0, "noCoverage": 0, "survivors": []}
+    known = dict.fromkeys(targets)
+    for path, entry in (data.get("files") or {}).items():
+        normalized = normalize_report_path(path, known)
+        if normalized not in targets:
+            continue
+        for mutant in entry.get("mutants", []):
+            status = mutant.get("status")
+            line = ((mutant.get("location") or {}).get("start") or {}).get("line")
+            if status in ("Killed", "Timeout"):
+                summary["detected"] += 1
+            elif status in ("Survived", "NoCoverage"):
+                summary["survived" if status == "Survived" else "noCoverage"] += 1
+                summary["survivors"].append(f"{normalized}:{line}: {mutant.get('mutatorName')} -> "
+                                            f"{str(mutant.get('replacement', '')).strip()[:80]} [{status}]")
+    return summary
+
+
+def python_acceptance_mutation(g: Gate, r: Result, targets: list, override: str | None) -> None:
+    """mutmut over the target modules, with a pytest plugin that deselects every test outside acceptanceTestsDir."""
+    if not override and not g.has_tool("mutmut"):
+        r.status, r.detail = "fail", "mutmut isn't installed (pip install mutmut)."
+        return
+    plugin_dir = g.root / ".atdd" / "cache" / "acceptance-only"
+    plugin_dir.mkdir(parents=True, exist_ok=True)
+    (plugin_dir / "atdd_acceptance_only.py").write_text(ACCEPTANCE_ONLY_PLUGIN, encoding="utf-8")
+    env = {
+        "PYTHONPATH": os.pathsep.join(p for p in (str(plugin_dir), os.environ.get("PYTHONPATH", "")) if p),
+        "PYTEST_ADDOPTS": " ".join(p for p in (os.environ.get("PYTEST_ADDOPTS", ""), "-p atdd_acceptance_only") if p),
+        "ATDD_ACCEPTANCE_DIR": g.gate_config.get("acceptanceTestsDir", "tests/acceptance"),
+    }
+    modules = sorted({python_module(t) for t in targets})
+    mutants = g.root / "mutants"
+    # mutmut caches which tests cover which function, and its cache doesn't know about the plugin: start clean, and
+    # leave nothing behind for a later build-mode run to reuse.
+    shutil.rmtree(mutants, ignore_errors=True)
+    try:
+        code = g.run("acceptance-mutation", override or "mutmut run " + " ".join(shlex.quote(f"{m}.*") for m in modules),
+                     env=env)
+        r.log = g.rel(g.log_path("acceptance-mutation"))
+        g.run("acceptance-mutation-results", "mutmut results --all true", env=env)
+        statuses = {}
+        for line in g.log_path("acceptance-mutation-results").read_text(encoding="utf-8", errors="replace").splitlines():
+            match = re.match(r"^\s*(\S+):\s*(.+?)\s*$", line)
+            if match and any(match.group(1).startswith(f"{m}.") for m in modules):
+                statuses[match.group(1)] = match.group(2)
+        if code != 0 or not statuses:
+            r.status, r.detail = "fail", (f"mutmut failed (exit {code}); the acceptance tests must pass on their own "
+                                         "first:\n" + g.tail(g.log_path("acceptance-mutation"), 25))
+            return
+        survived = sorted(n for n, s in statuses.items() if s in MUTMUT_SURVIVED)
+        untested = sorted(n for n, s in statuses.items() if s == "no tests")
+        for name in (survived + untested)[:40]:
+            g.run("acceptance-mutation-diffs", ["mutmut", "show", name], append=True, env=env)
+        report_acceptance_mutants(g, r, {
+            "detected": sum(1 for s in statuses.values() if s in MUTMUT_DETECTED),
+            "survived": len(survived),
+            "noCoverage": len(untested),
+            "survivors": [f"{n} [Survived]" for n in survived] + [f"{n} [NoCoverage]" for n in untested],
+        }, diffs=g.log_path("acceptance-mutation-diffs"))
+    finally:
+        shutil.rmtree(mutants, ignore_errors=True)
+
+
+def report_acceptance_mutants(g: Gate, r: Result, summary: dict, diffs: Path | None = None) -> None:
+    survivors = summary["survivors"]
+    (g.out / "acceptance-mutation-survivors.txt").write_text("".join(f"{s}\n" for s in survivors), encoding="utf-8")
+    run = summary["detected"] + summary["survived"]
+    if run + summary["noCoverage"] == 0:
+        r.status, r.detail = "skipped", "No mutants in the coverage targets (only declarations, or nothing mutable)."
+        return
+    r.metric = (f"{summary['detected']} of {run} mutant(s) in code the scenarios run were noticed "
+                f"({percent(summary['detected'], run)}%); {summary['noCoverage']} in code no scenario runs")
+    if survivors:
+        r.status = "warn"
+        r.detail = ("Mutants the acceptance tests didn't notice. [Survived]: no assertion noticed the change (if the "
+                    "line is also in target-uncovered.txt, no scenario even runs it). If a scenario's Then claims that "
+                    "outcome, its step definition asserts too little; if none does, no scenario describes the behavior "
+                    "(a spec gap for a human). [NoCoverage]: no scenario runs the code at all"
+                    + (f". Each mutant's diff is in {g.rel(diffs)}" if diffs and diffs.exists() else "")
+                    + ":\n" + "\n".join(survivors[:40]))
+
+
 CHECKS = {
+    "production-untouched": check_production_untouched,
     "build": check_build,
     "format": check_format,
     "lint": check_lint,
@@ -1727,16 +2154,20 @@ CHECKS = {
     "vulnerabilities": check_vulnerabilities,
     "suppressions": check_suppressions,
     "locked-files": check_locked_files,
+    "acceptance-coverage": check_acceptance_coverage,
+    "acceptance-mutation": check_acceptance_mutation,
 }
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="ATDD quality gate")
-    parser.add_argument("mode", choices=["fast", "full"])
+    parser.add_argument("mode", choices=list(MODES))
     parser.add_argument("--only", help="comma-separated subset of checks to run")
     parser.add_argument("--base", default=os.environ.get("ATDD_BASE"))
     parser.add_argument("--out", default=os.environ.get("ATDD_OUT"))
     parser.add_argument("--scenarios-commit", default=os.environ.get("ATDD_SCENARIOS_COMMIT"))
+    parser.add_argument("--cover-targets", default=os.environ.get("ATDD_COVER_TARGETS"),
+                        help="file listing the production files a cover run protects, one per line")
     args = parser.parse_args()
 
     root = Path(git(Path.cwd(), "rev-parse", "--show-toplevel").strip())
@@ -1767,11 +2198,13 @@ def main() -> int:
     base = resolve_base(root, config, args.base)
     gate = Gate(root=root, config=config, mode=args.mode, base=base, out=out, scenarios_commit=args.scenarios_commit,
                 stack=stack, profile=STACKS[stack], gate_config=gate_config,
-                thresholds={**DEFAULT_THRESHOLDS, **(gate_config.get("thresholds") or {})})
+                thresholds={**DEFAULT_THRESHOLDS, **(gate_config.get("thresholds") or {})},
+                cover_targets_file=args.cover_targets)
     gate.changed = changed_files(root, base)
     gate.added_lines = added_lines(root, base, gate.changed)
 
-    names = gate_config.get(args.mode) or (FAST_CHECKS if args.mode == "fast" else FULL_CHECKS)
+    config_key, default_checks = MODES[args.mode]
+    names = gate_config.get(config_key) or default_checks
     if args.only:
         names = [n.strip() for n in args.only.split(",") if n.strip()]
     unknown = [n for n in names if n not in CHECKS]
@@ -1806,6 +2239,9 @@ def main() -> int:
         "changedFiles": gate.changed,
         "checks": [vars(r) for r in results],
     }
+    if gate.cover:
+        report["testPaths"] = cover_test_paths(config)
+        report["coverTargets"] = gate.targets()[0] or []
     (out / "report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
 
     print()

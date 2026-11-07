@@ -1,6 +1,6 @@
 ---
 name: gherkin-binding
-description: How to bind approved Gherkin scenarios as honest, strict, executable acceptance tests in .NET (Reqnroll), TypeScript (Cucumber.js / playwright-bdd), Next.js/React (playwright-bdd against the production build, Vitest and React Testing Library for units) or Python (pytest-bdd). Covers driving the system through its public interface, faking only external boundaries, controlling time, and the hollow-step anti-patterns reviewers reject. Use whenever writing or reviewing step definitions, acceptance-test plumbing for .feature files, or the unit and component tests beside them.
+description: How to bind approved Gherkin scenarios as honest, strict, executable acceptance tests in .NET (Reqnroll), TypeScript (Cucumber.js / playwright-bdd), Next.js/React (playwright-bdd against the production build, Vitest and React Testing Library for units) or Python (pytest-bdd). Covers driving the system through its public interface, faking only external boundaries, controlling time, and the hollow-step anti-patterns reviewers reject. Also covers binding scenarios to existing code that may not change (/atdd:cover). Use whenever writing or reviewing step definitions, acceptance-test plumbing for .feature files, or the unit and component tests beside them.
 ---
 
 # Binding Gherkin honestly
@@ -18,6 +18,8 @@ Your stack's details are in `references/<stack>.md`, where the stack is `.claude
 - `${CLAUDE_SKILL_DIR}/references/typescript.md`: Cucumber.js / playwright-bdd
 - `${CLAUDE_SKILL_DIR}/references/nextjs.md`: playwright-bdd, Vitest and React Testing Library in a Next.js app (stack `nextjs`)
 - `${CLAUDE_SKILL_DIR}/references/python.md`: pytest-bdd
+
+Covering code that already exists, without changing it (`/atdd:cover`), adds constraints of its own. Read `${CLAUDE_SKILL_DIR}/references/existing-code.md` too: seams that need no production change, what to do when there's no seam, and discrepancies between a scenario and the code.
 
 ## Principles
 

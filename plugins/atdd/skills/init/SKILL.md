@@ -1,6 +1,6 @@
 ---
 name: init
-description: Set up the current repository for the atdd pipeline. Detects the stack (.NET, TypeScript, Next.js or Python), writes .claude/atdd.json, installs the quality gate (scripts/atdd/gate.py with the stack's tool configs), the QA start/stop scripts and the Gherkin runner config, lists existing dependency cycles, and checks that Matt Pocock's issue-tracker setup is in place. Run once per repo before /atdd:gherkin and /atdd:build.
+description: Set up the current repository for the atdd pipeline. Detects the stack (.NET, TypeScript, Next.js or Python), writes .claude/atdd.json, installs the quality gate (scripts/atdd/gate.py with the stack's tool configs), the QA start/stop scripts and the Gherkin runner config, lists existing dependency cycles, and checks that Matt Pocock's issue-tracker setup is in place. Run once per repo before /atdd:gherkin, /atdd:build and /atdd:cover.
 disable-model-invocation: true
 argument-hint: "[stack: dotnet | typescript | nextjs | python]"
 ---
@@ -69,6 +69,7 @@ Follow `references/<stack>.md`. In every case:
      - every file that holds a threshold or a strictness setting.
 
      A threshold the implementer can edit isn't a threshold.
+   - `gate.testDirs` must name test folders only. `/atdd:cover` lets its coverer change files there (and in `featuresDir`) and nowhere else, so a production folder in that list would let it change production code. To narrow it further, for example to the acceptance test project, set `cover.testPaths` to globs.
 2. **Copy into `scripts/atdd/`:**
    - the gate, `${CLAUDE_PLUGIN_ROOT}/skills/quality-gate/scripts/gate.py`, unchanged, as `scripts/atdd/gate.py`;
    - the gate's helpers for the stack, unchanged: `eslint.quality.mjs`, `eslint-npath.mjs`, `coverage.mjs` and `cobertura-reporter.mjs` from `templates/typescript/` (TypeScript and Next.js), or the `templates/dotnet/dotnet-quality/` folder (.NET);
@@ -93,7 +94,7 @@ Follow `references/<stack>.md`. In every case:
 
    Ask before installing system-level tools. Tell the user about `pipx install lizard==1.24.3 diff-cover` if they're missing.
 6. **Ignore the gate's outputs** in `.gitignore`: `.atdd/`, plus the stack's tool output dirs (`reports/`, `coverage/`, `.stryker-tmp/`, `mutants/`, `StrykerOutput/`; Next.js also `.next/`, `.features-gen/`, `playwright-report/`, `test-results/` and the Prisma client folder).
-7. **Add an `## ATDD pipeline` block** to `CLAUDE.md`, or `AGENTS.md` if that's what the repo uses; never create a second file. Keep it to a few lines: where the config is, the two commands (`/atdd:gherkin <issue>`, then `/atdd:build <issue>`), and the gate commands. If the block exists, update it in place.
+7. **Add an `## ATDD pipeline` block** to `CLAUDE.md`, or `AGENTS.md` if that's what the repo uses; never create a second file. Keep it to a few lines: where the config is, the commands (`/atdd:gherkin <issue>`, then `/atdd:build <issue>` for new behavior or `/atdd:cover <issue>` for behavior the code already has), and the gate commands. If the block exists, update it in place.
 
 ## 4. Prove it works
 
@@ -109,7 +110,7 @@ Tell the user, briefly:
 - what you added or changed, file by file;
 - what they should review and commit (all of it, in one commit, before the first `/atdd:build`; the pipeline expects a clean tree);
 - what's still missing, typically:
-  - **existing dependency cycles**, each with its loop and evidence lines. Every gate run fails until they're broken, so they come first, in a change of their own;
+  - **existing dependency cycles**, each with its loop and evidence lines. Every `fast` and `full` gate run fails until they're broken, so `/atdd:build` can't commit before that. `/atdd:cover` doesn't check them, and in a codebase without tests it's the better first step: covering the behavior first makes breaking the cycles safe;
   - architecture rules: ArchUnitNET tests, dependency-cruiser rules or import-linter contracts. The architecture check stays `skipped` until they exist.
   - the Matt Pocock issue-tracker setup;
   - anything in `qa.notes`.

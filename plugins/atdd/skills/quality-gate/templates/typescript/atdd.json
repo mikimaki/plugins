@@ -17,6 +17,8 @@
   "commands": {
     "fastChecks": "python3 scripts/atdd/gate.py fast",
     "qualityGate": "python3 scripts/atdd/gate.py full",
+    "coverFastChecks": "python3 scripts/atdd/gate.py cover-fast",
+    "coverGate": "python3 scripts/atdd/gate.py cover-full",
     "acceptanceTests": "npx cucumber-js",
     "unitTests": "npx vitest run",
     "qaUp": "bash scripts/atdd/qa-up.sh",
@@ -33,7 +35,7 @@
     "glossary": "GLOSSARY.md",
     "issueTracker": "docs/agents/issue-tracker.md"
   },
-  "limits": { "gherkinRounds": 3, "buildRounds": 5 },
+  "limits": { "gherkinRounds": 3, "buildRounds": 5, "coverRounds": 5 },
   "gate": {
     "sourceDirs": ["src"],
     "testDirs": ["test", "tests", "features"],
