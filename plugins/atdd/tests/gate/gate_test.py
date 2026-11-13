@@ -28,6 +28,64 @@ def test_goal_book_answers_in_time():
     assert GoalBook().goal_of("robin") == "the goal book answered in time"
 """
 
+PUSH_FEATURE = """Feature: Push messages
+
+  Scenario: The gateway answers in time
+    Given the push gateway
+    Then the gateway answers in time
+"""
+
+FAILING_PUSH_SCENARIOS = """from pytest_bdd import given, scenarios, then
+
+from stepgoals import push_gateway
+
+scenarios("push")
+
+
+@given("the push gateway", target_fixture="url")
+def gateway():
+    return push_gateway.PUSH_URL
+
+
+@then("the gateway answers in time")
+def answers(url):
+    assert url == "the gateway answered in time"
+"""
+
+PUSH_SCENARIO = "the push gateway answers in time"
+
+PUSH_HELPER = """from stepgoals import push_gateway
+
+
+def gateway_url():
+    return push_gateway.PUSH_URL
+"""
+
+GOALS_HELPER = """from stepgoals.goals import GoalBook
+
+
+def new_book():
+    return GoalBook()
+"""
+
+FAILING_HELPED_TEST = """import helpers
+
+
+def test_helped_check_answers_in_time():
+    assert helpers.__name__ == "the helper answered in time"
+"""
+
+UNPARSEABLE_MODULE = "def broken(:\n    pass\n"
+
+FAILING_LAZY_IMPORT_TEST = """def unused():
+    from stepgoals import legacy
+    return legacy
+
+
+def test_legacy_answers_in_time():
+    assert unused is None
+"""
+
 FAILING_APP_TEST = """from stepgoals.app import App
 
 
@@ -89,10 +147,12 @@ class GateTest(unittest.TestCase):
         report = fixture.run_gate(self.repo, "full")
         flaky = "tests/unit/test_push.py::test_push_gateway_answers_in_time"
         self.assertEqual("flaky", check(report, "tests")["status"])
-        for name in ("diff-coverage", "mutation"):
-            measured = check(report, name)
-            self.assertIn("killed" if name == "mutation" else "changed line", measured["metric"], measured["detail"])
-            self.assertIn(flaky, measured["detail"])
+        coverage, mutation = check(report, "diff-coverage"), check(report, "mutation")
+        self.assertEqual("pass", coverage["status"], coverage["detail"])
+        self.assertIn(flaky, coverage["detail"])
+        self.assertNotIn("mutmut failed", mutation["detail"])
+        self.assertIn("killed", mutation["metric"], mutation["detail"])
+        self.assertIn(flaky, mutation["detail"])
 
     def test_failing_test_added_on_the_branch_fails(self):
         fixture.add_to_feature(self.repo, "tests/unit/test_push.py", FAILING_PUSH_TEST)
@@ -115,6 +175,35 @@ class GateTest(unittest.TestCase):
         fixture.add_to_base(self.repo, "tests/unit/test_push.py", FAILING_PUSH_TEST)
         fixture.add_to_base(self.repo, "tests/unit/test_goal_book.py", FAILING_GOALS_TEST)
         self.assert_tests_fail(fixture.run_gate(self.repo, "fast"), "tests/unit/test_goal_book.py::test_goal_book_answers_in_time")
+
+    def test_failing_scenario_whose_feature_file_changed_on_the_branch_fails(self):
+        fixture.add_to_base(self.repo, "features/push/push.feature", PUSH_FEATURE)
+        fixture.add_to_base(self.repo, "tests/acceptance/test_push_scenarios.py", FAILING_PUSH_SCENARIOS)
+        fixture.add_to_feature(self.repo, "features/push/push.feature", PUSH_FEATURE.replace("Push messages", "Push"))
+        self.assert_tests_fail(fixture.run_gate(self.repo, "fast"), "features/push/push.feature")
+
+    def test_failing_scenario_stays_flaky_when_only_another_feature_file_changed(self):
+        fixture.add_to_base(self.repo, "features/push/push.feature", PUSH_FEATURE)
+        fixture.add_to_base(self.repo, "tests/acceptance/test_push_scenarios.py", FAILING_PUSH_SCENARIOS)
+        fixture.add_to_feature(self.repo, "features/goals/goals.feature", fixture.FEATURE.replace("Daily", "A daily"))
+        tests = check(fixture.run_gate(self.repo, "fast"), "tests")
+        self.assertEqual("flaky", tests["status"], tests["detail"])
+
+    def test_failing_test_reaching_changed_production_code_through_a_test_helper_fails(self):
+        fixture.add_to_base(self.repo, "tests/unit/helpers.py", GOALS_HELPER)
+        fixture.add_to_base(self.repo, "tests/unit/test_helped.py", FAILING_HELPED_TEST)
+        self.assert_tests_fail(fixture.run_gate(self.repo, "fast"), "src/stepgoals/goals.py")
+
+    def test_failing_test_using_a_helper_changed_on_the_branch_fails(self):
+        fixture.add_to_base(self.repo, "tests/unit/helpers.py", PUSH_HELPER)
+        fixture.add_to_base(self.repo, "tests/unit/test_helped.py", FAILING_HELPED_TEST)
+        fixture.add_to_feature(self.repo, "tests/unit/helpers.py", PUSH_HELPER + "\n\nTIMEOUT = 5\n")
+        self.assert_tests_fail(fixture.run_gate(self.repo, "fast"), "tests/unit/helpers.py")
+
+    def test_failing_test_whose_imports_cannot_be_parsed_fails_and_names_the_file(self):
+        fixture.add_to_base(self.repo, "src/stepgoals/legacy.py", UNPARSEABLE_MODULE)
+        fixture.add_to_base(self.repo, "tests/unit/test_legacy.py", FAILING_LAZY_IMPORT_TEST)
+        self.assert_tests_fail(fixture.run_gate(self.repo, "fast"), "src/stepgoals/legacy.py")
 
     def assert_tests_fail(self, report: dict, why: str):
         tests = check(report, "tests")
