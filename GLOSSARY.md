@@ -26,6 +26,10 @@ _Avoid_: last run, previous commit
 An executable record of one scenario as QA performed it against the running app, which a later QA round runs again instead of re-testing that scenario by hand.
 _Avoid_: evidence (evidence also covers findings), regression test
 
+**Idle wait**:
+Time QA spends after acting in a scenario during which the outcome depends only on a scheduled trigger in the app firing (a cron job, timer, delay, expiry or poll interval), not on work in progress.
+_Avoid_: long wait, real-time wait
+
 ### Code under test
 
 **Test paths**:
