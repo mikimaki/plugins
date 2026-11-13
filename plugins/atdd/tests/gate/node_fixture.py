@@ -12,11 +12,10 @@ import json
 import os
 import shutil
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
 
-from fixture import GATE, add_to_base, add_to_feature, commit, git, write  # noqa: F401  (re-exported)
+from fixture import GATE, add_to_base, add_to_feature, commit, configure_gate, git, run_gate, write  # noqa: F401  (re-exported)
 
 PLUGIN = Path(__file__).resolve().parents[2]
 TEMPLATES = PLUGIN / "skills" / "quality-gate" / "templates"
@@ -263,10 +262,3 @@ def configure_stryker(repo: Path, **settings) -> None:
     path = repo / "stryker.config.json"
     path.write_text(json.dumps({**json.loads(path.read_text(encoding="utf-8")), **settings}, indent=2) + "\n",
                     encoding="utf-8")
-
-
-def run_gate(repo: Path, mode: str, *args: str) -> dict:
-    env = {k: v for k, v in os.environ.items() if k not in ("ATDD_BASE", "ATDD_OUT")}
-    subprocess.run([sys.executable, "scripts/atdd/gate.py", mode, *args], cwd=repo, env=env, capture_output=True,
-                   text=True)
-    return json.loads((repo / ".atdd" / "quality" / "latest" / "report.json").read_text(encoding="utf-8"))

@@ -11,6 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import node_fixture as fixture  # noqa: E402
+from fixture import check, failures  # noqa: E402
 
 FAILING_PUSH_TEST = """import { expect, it } from 'vitest'
 import { PUSH_URL } from '../src/push.ts'
@@ -41,6 +42,11 @@ import { gatewayUrl } from './helpers.ts'
 it('answers in time with help', () => {
   expect(gatewayUrl()).toBe('the gateway answered in time')
 })
+"""
+
+GOALS_SETUP = """import { GoalBook } from '../src/goals.ts'
+
+export const book = new GoalBook()
 """
 
 PUSH_FEATURE = """Feature: Push messages
@@ -83,14 +89,6 @@ Then('the gateway answers in time', async () => {
 """
 
 
-def check(report: dict, name: str) -> dict:
-    return next(c for c in report["checks"] if c["name"] == name)
-
-
-def failures(report: dict) -> str:
-    return "\n".join(f"{c['name']}: {c['detail']}" for c in report["checks"] if c["status"] == "fail")
-
-
 class TypeScriptGateTest(unittest.TestCase):
     stack = "typescript"
 
@@ -124,6 +122,16 @@ class TypeScriptGateTest(unittest.TestCase):
             self.assertIn(flaky, coverage["detail"])
             self.assertIn(flaky, mutation["detail"])
         self.assertTrue(report["passed"], failures(report))
+
+    def test_mutation_override_gets_the_test_files_without_the_flaky_ones(self):
+        fixture.add_to_base(self.repo, "test/push.test.ts", FAILING_PUSH_TEST)
+        fixture.configure_stryker(self.repo, vitest={"configFile": "vitest.config.mts", "related": False})
+        fixture.configure_gate(self.repo, commands={"mutation": (
+            'npx --no-install stryker run --mutate src/goals.ts --testFiles "$ATDD_TEST_FILES_WITHOUT_FLAKY"')})
+        report = fixture.run_gate(self.repo, "full", "--only", "tests,mutation")
+        mutation = check(report, "mutation")
+        self.assertEqual("pass", mutation["status"], mutation["detail"])
+        self.assertIn("test/push.test.ts::answers in time", mutation["detail"])
 
     def test_failing_test_added_on_the_branch_fails(self):
         fixture.add_to_feature(self.repo, "test/push.test.ts", FAILING_PUSH_TEST)
@@ -169,6 +177,20 @@ class TypeScriptGateTest(unittest.TestCase):
         fixture.add_to_feature(self.repo, "test/helpers.ts", PUSH_HELPER + "\nexport const TIMEOUT = 5\n")
         self.assert_tests_fail(fixture.run_gate(self.repo, "fast"), "test/helpers.ts")
 
+    def test_failing_test_whose_setup_file_reaches_changed_production_code_fails(self):
+        fixture.add_to_base(self.repo, "test/setup.ts", GOALS_SETUP)
+        fixture.add_to_base(self.repo, "vitest.config.mts", fixture.VITEST_CONFIG.replace(
+            "include: ['test/**/*.test.ts'],", "include: ['test/**/*.test.ts'],\n    setupFiles: ['./test/setup.ts'],"))
+        fixture.add_to_base(self.repo, "test/push.test.ts", FAILING_PUSH_TEST)
+        self.assert_tests_fail(fixture.run_gate(self.repo, "fast"), "imports reach changed production code: src/goals.ts")
+
+    def test_failing_test_fails_when_the_setup_files_can_not_be_read_from_the_config(self):
+        fixture.add_to_base(self.repo, "vitest.config.mts", fixture.VITEST_CONFIG.replace(
+            "include: ['test/**/*.test.ts'],", "include: ['test/**/*.test.ts'],\n    setupFiles: SETUP_FILES,").replace(
+            "export default", "const SETUP_FILES: string[] = []\n\nexport default"))
+        fixture.add_to_base(self.repo, "test/push.test.ts", FAILING_PUSH_TEST)
+        self.assert_tests_fail(fixture.run_gate(self.repo, "fast"), "setupFiles")
+
     def test_a_flaky_failure_beside_a_real_one_fails(self):
         fixture.add_to_base(self.repo, "test/push.test.ts", FAILING_PUSH_TEST)
         fixture.add_to_base(self.repo, "test/app.test.ts", FAILING_APP_TEST)
@@ -179,6 +201,29 @@ class TypeScriptGateTest(unittest.TestCase):
         self.assertEqual("fail", tests["status"], tests["detail"])
         self.assertIn(why, tests["detail"])
         self.assertFalse(report["passed"])
+
+
+class TypeScriptCoverGateTest(unittest.TestCase):
+    """Cover mode: Next.js skips acceptance mutation (a production build per mutant), so TypeScript alone."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.repo = fixture.build(Path(self.tmp.name) / "repo", "typescript")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_cover_gate_mutates_the_targets_without_the_flaky_scenario(self):
+        fixture.add_to_base(self.repo, "features/push/push.feature", PUSH_FEATURE)
+        fixture.add_to_base(self.repo, "features/steps/push.steps.ts", CUCUMBER_PUSH_STEPS)
+        fixture.write(self.repo, ".atdd/targets.txt", "src/goals.ts\n")
+        report = fixture.run_gate(self.repo, "cover-full", "--only", "tests,acceptance-mutation",
+                                  env={"ATDD_COVER_TARGETS": ".atdd/targets.txt"})
+        self.assertEqual("flaky", check(report, "tests")["status"], check(report, "tests")["detail"])
+        mutation = check(report, "acceptance-mutation")
+        self.assertNotEqual("fail", mutation["status"], mutation["detail"])
+        self.assertIn("were noticed", mutation["metric"], mutation["detail"])
+        self.assertIn(PUSH_SCENARIO, mutation["detail"])
 
 
 class NextJsGateTest(TypeScriptGateTest):

@@ -10,6 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import dotnet_fixture as fixture  # noqa: E402
+from fixture import check, failures  # noqa: E402
 
 FAILING_PUSH_TEST = """using Steps.Push;
 using Xunit;
@@ -46,7 +47,14 @@ public static class GatewayTimeouts
 }
 """
 
-FAILING_PUSH_FEATURE = """Feature: Slow push
+DIRECTORY_BUILD_PROPS = """<Project>
+  <PropertyGroup>
+    <Deterministic>true</Deterministic>
+  </PropertyGroup>
+</Project>
+"""
+
+FAILING_PUSH_FEATURE ="""Feature: Slow push
 
   Scenario: The gateway answers in time
     Given the push gateway
@@ -54,14 +62,6 @@ FAILING_PUSH_FEATURE = """Feature: Slow push
 """
 
 FLAKY_PUSH_SCENARIO = "Steps.Acceptance.Features.SlowPushFeature.TheGatewayAnswersInTime"
-
-
-def failures(report: dict) -> str:
-    return "\n".join(f"{c['name']}: {c['detail']}" for c in report["checks"] if c["status"] == "fail")
-
-
-def check(report: dict, name: str) -> dict:
-    return next(c for c in report["checks"] if c["name"] == name)
 
 
 class DotnetGateTest(unittest.TestCase):
@@ -91,6 +91,18 @@ class DotnetGateTest(unittest.TestCase):
         self.assertTrue(report["passed"], failures(report))
         self.assertNotIn("tests are failing", (self.repo / check(report, "mutation")["log"]).read_text(encoding="utf-8"))
 
+    def test_cover_gate_mutates_the_targets_with_the_acceptance_tests_alone_without_the_flaky_scenario(self):
+        self.repo = fixture.build(Path(self.tmp.name) / "repo", with_stryker=True)
+        fixture.add_to_base(self.repo, "tests/Steps.Acceptance/Features/SlowPush.feature", FAILING_PUSH_FEATURE)
+        fixture.write(self.repo, ".atdd/targets.txt", "src/Steps.Push/PushGateway.cs\n")
+        report = fixture.run_gate(self.repo, "cover-full", "--only", "tests,acceptance-mutation",
+                                  env={"ATDD_COVER_TARGETS": ".atdd/targets.txt"})
+        self.assertEqual("flaky", check(report, "tests")["status"], check(report, "tests")["detail"])
+        mutation = check(report, "acceptance-mutation")
+        self.assertEqual("pass", mutation["status"], mutation["detail"])
+        self.assertIn("1 of 1 mutant(s)", mutation["metric"])
+        self.assertIn(FLAKY_PUSH_SCENARIO, mutation["detail"])
+
     def test_failing_test_whose_project_references_a_changed_project_transitively_fails(self):
         fixture.add_to_base(self.repo, "tests/Steps.Reports.Tests/SlowReportTests.cs", FAILING_REPORT_TEST)
         self.assert_tests_fail(fixture.run_gate(self.repo, "fast", "--only", "tests"), "src/Steps.Goals/GoalBook.cs")
@@ -100,6 +112,17 @@ class DotnetGateTest(unittest.TestCase):
         fixture.add_to_feature(self.repo, "tests/Steps.Push.Tests/GatewayTimeouts.cs", GATEWAY_TIMEOUTS)
         self.assert_tests_fail(fixture.run_gate(self.repo, "fast", "--only", "tests"),
                                "tests/Steps.Push.Tests/GatewayTimeouts.cs")
+
+    def test_failing_test_fails_when_a_build_file_outside_every_project_changed(self):
+        fixture.add_to_base(self.repo, "tests/Steps.Push.Tests/SlowGatewayTests.cs", FAILING_PUSH_TEST)
+        fixture.add_to_feature(self.repo, "Directory.Build.props", DIRECTORY_BUILD_PROPS)
+        self.assert_tests_fail(fixture.run_gate(self.repo, "fast", "--only", "tests"), "Directory.Build.props")
+
+    def test_failing_test_stays_flaky_when_only_a_file_outside_projects_that_builds_nothing_changed(self):
+        fixture.add_to_base(self.repo, "tests/Steps.Push.Tests/SlowGatewayTests.cs", FAILING_PUSH_TEST)
+        fixture.add_to_feature(self.repo, "docs/push.md", "# Push\n")
+        tests = check(fixture.run_gate(self.repo, "fast", "--only", "tests"), "tests")
+        self.assertEqual("flaky", tests["status"], tests["detail"])
 
     def test_failing_scenario_whose_project_reaches_no_changed_project_is_flaky(self):
         fixture.add_to_base(self.repo, "tests/Steps.Acceptance/Features/SlowPush.feature", FAILING_PUSH_FEATURE)

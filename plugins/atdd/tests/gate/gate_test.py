@@ -10,6 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fixture  # noqa: E402
+from fixture import check, failures  # noqa: E402
 
 FAST_STRUCTURAL_CHECKS = ["duplication", "architecture", "dead-code", "locked-files"]
 FULL_ONLY = ["diff-coverage", "mutation", "vulnerabilities"]
@@ -98,14 +99,6 @@ def names(report: dict) -> list:
     return [check["name"] for check in report["checks"]]
 
 
-def failures(report: dict) -> str:
-    return "\n".join(f"{c['name']}: {c['detail']}" for c in report["checks"] if c["status"] == "fail")
-
-
-def check(report: dict, name: str) -> dict:
-    return next(c for c in report["checks"] if c["name"] == name)
-
-
 class GateTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -153,6 +146,18 @@ class GateTest(unittest.TestCase):
         self.assertNotIn("mutmut failed", mutation["detail"])
         self.assertIn("killed", mutation["metric"], mutation["detail"])
         self.assertIn(flaky, mutation["detail"])
+
+    def test_cover_gate_mutates_the_targets_without_the_flaky_scenario(self):
+        fixture.add_to_base(self.repo, "features/push/push.feature", PUSH_FEATURE)
+        fixture.add_to_base(self.repo, "tests/acceptance/test_push_scenarios.py", FAILING_PUSH_SCENARIOS)
+        fixture.write(self.repo, ".atdd/targets.txt", "src/stepgoals/goals.py\n")
+        report = fixture.run_gate(self.repo, "cover-full", "--only", "tests,acceptance-mutation",
+                                  env={"ATDD_COVER_TARGETS": ".atdd/targets.txt"})
+        self.assertEqual("flaky", check(report, "tests")["status"], check(report, "tests")["detail"])
+        mutation = check(report, "acceptance-mutation")
+        self.assertNotIn("mutmut failed", mutation["detail"])
+        self.assertIn("were noticed", mutation["metric"], mutation["detail"])
+        self.assertIn("tests/acceptance/test_push_scenarios.py::", mutation["detail"])
 
     def test_failing_test_added_on_the_branch_fails(self):
         fixture.add_to_feature(self.repo, "tests/unit/test_push.py", FAILING_PUSH_TEST)

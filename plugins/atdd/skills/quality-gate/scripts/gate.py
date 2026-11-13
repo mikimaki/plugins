@@ -164,7 +164,7 @@ class Gate:
     branches_measured: bool = False
     cover_targets_file: str | None = None
     flaky_tests: list = field(default_factory=list)
-    unit_test_files_without_flaky: list = field(default_factory=list)
+    failing_node_tests: list = field(default_factory=list)
     _functions: dict | None = None
 
     # ---------- helpers ----------
@@ -172,6 +172,10 @@ class Gate:
     @property
     def node(self) -> bool:
         return self.stack in NODE_STACKS
+
+    @property
+    def measures_coverage(self) -> bool:
+        return self.mode == "full"
 
     @property
     def cover(self) -> bool:
@@ -618,19 +622,18 @@ def ruff_problems(g: Gate, report: Path):
 
 
 def check_tests(g: Gate, r: Result) -> None:
-    with_coverage = g.mode == "full"
     r.log = g.rel(g.log_path("tests"))
-    override = g.command_override("testsWithCoverage" if with_coverage else "tests")
+    override = g.command_override("testsWithCoverage" if g.measures_coverage else "tests")
     if override:
         code = g.run("tests", override, env={"ATDD_OUT": str(g.out)})
-        if with_coverage:
+        if g.measures_coverage:
             g.coverage_reports = coverage_files(g)
     elif g.stack == "dotnet":
-        code = run_dotnet_tests(g, r, with_coverage)
+        code = run_dotnet_tests(g, r)
     elif g.node:
-        code = run_node_tests(g, r, with_coverage)
+        code = run_node_tests(g, r)
     else:
-        code = run_python_tests(g, r, with_coverage)
+        code = run_python_tests(g, r)
     if code != 0:
         r.status = "fail"
         r.detail = "\n\n".join(filter(None, ["Tests failed:\n" + g.tail(g.log_path("tests"), 30), r.detail]))
@@ -639,11 +642,11 @@ def check_tests(g: Gate, r: Result) -> None:
 PYTEST_TESTS_FAILED = 1
 
 
-def run_python_tests(g: Gate, r: Result, with_coverage: bool) -> int:
+def run_python_tests(g: Gate, r: Result) -> int:
     """pytest, with its failures classified. When every failure is flaky the check reports flaky and, in full mode,
     measures coverage again without those tests. Returns the exit code that decides whether the check fails."""
     junit = g.out / "junit.xml"
-    code = run_pytest(g, with_coverage, f"--junitxml={shlex.quote(str(junit))} -o junit_family=xunit1")
+    code = run_pytest(g, f"--junitxml={shlex.quote(str(junit))} -o junit_family=xunit1")
     if code != PYTEST_TESTS_FAILED:
         return code
     try:
@@ -651,11 +654,10 @@ def run_python_tests(g: Gate, r: Result, with_coverage: bool) -> int:
     except GateError as error:
         r.detail = f"Can't tell whether the failures are flaky: {error}"
         return code
-    return report_failures(g, r, verdicts, code, with_coverage,
-                           lambda: run_pytest(g, with_coverage, "", append=True, env=without_flaky_tests(g)))
+    return report_failures(g, r, verdicts, code, lambda: run_pytest(g, "", append=True, env=without_flaky_tests(g)))
 
 
-def report_failures(g: Gate, r: Result, verdicts: dict, code: int, with_coverage: bool, rerun) -> int:
+def report_failures(g: Gate, r: Result, verdicts: dict, code: int, rerun) -> int:
     """The exit code that decides whether the tests check fails, given the verdicts on the failing tests. When every
     failure is flaky the check reports flaky and, in full mode, rerun() measures coverage again without those tests."""
     if not verdicts:
@@ -665,10 +667,9 @@ def report_failures(g: Gate, r: Result, verdicts: dict, code: int, with_coverage
         return code
     g.flaky_tests = sorted(verdicts)
     r.status = "flaky"
-    r.detail = (f"Every failing test is flaky: nothing it runs on the test side changed since the base {g.base[:10]}, "
-                "and it reaches no production file this branch changed. Advisory; it doesn't fail the gate:\n"
-                + describe_verdicts(verdicts, flaky=True))
-    if not with_coverage:
+    r.detail = (f"Every failing test is flaky: nothing it depends on changed since the base {g.base[:10]}. Advisory; "
+                "it doesn't fail the gate:\n" + describe_verdicts(verdicts, flaky=True))
+    if not g.measures_coverage:
         return 0
     again = rerun()
     if again != 0:
@@ -677,9 +678,9 @@ def report_failures(g: Gate, r: Result, verdicts: dict, code: int, with_coverage
     return again
 
 
-def run_pytest(g: Gate, with_coverage: bool, extra: str, append: bool = False, env: dict | None = None) -> int:
+def run_pytest(g: Gate, extra: str, append: bool = False, env: dict | None = None) -> int:
     base = g.command_override("pytest") or "python3 -m pytest --ignore=mutants"
-    if not with_coverage:
+    if not g.measures_coverage:
         return g.run("tests", f"{base} {extra}".strip(), append=append, env=env)
     report = g.out / "coverage.xml"
     cov = " ".join(f"--cov={shlex.quote(d)}" for d in g.gate_config.get("sourceDirs", [])) or "--cov=."
@@ -693,10 +694,10 @@ def run_pytest(g: Gate, with_coverage: bool, extra: str, append: bool = False, e
 DOTNET_TEST_BROKE = re.compile(r":\s+error\s+[A-Z]+\d+:|Test Run Aborted", re.IGNORECASE)
 
 
-def run_dotnet_tests(g: Gate, r: Result, with_coverage: bool) -> int:
+def run_dotnet_tests(g: Gate, r: Result) -> int:
     """dotnet test, with its failures classified from the TRX reports the way run_python_tests classifies pytest's."""
     results = g.out / "test-results"
-    code = run_dotnet_test(g, results, with_coverage)
+    code = run_dotnet_test(g, results)
     if code == 0 or DOTNET_TEST_BROKE.search(g.log_path("tests").read_text(encoding="utf-8", errors="replace")):
         return code
     try:
@@ -704,44 +705,40 @@ def run_dotnet_tests(g: Gate, r: Result, with_coverage: bool) -> int:
     except GateError as error:
         r.detail = f"Can't tell whether the failures are flaky: {error}"
         return code
-    if not verdicts:
-        return code
-    if not all(verdict.flaky for verdict in verdicts.values()):
-        r.detail = "Not flaky:\n" + describe_verdicts(verdicts, flaky=False)
-        return code
-    g.flaky_tests = sorted(verdicts)
-    r.status = "flaky"
-    r.detail = (f"Every failing test is flaky: neither its test project nor a project it references changed since the "
-                f"base {g.base[:10]}. Advisory; it doesn't fail the gate:\n" + describe_verdicts(verdicts, flaky=True))
-    if not with_coverage:
-        return 0
-    shutil.rmtree(results, ignore_errors=True)
-    rerun = run_dotnet_test(g, results, with_coverage, ["--filter", dotnet_flaky_filter(g)])
-    if rerun != 0:
-        r.detail = (f"The coverage run without the flaky tests failed too (exit {rerun}), so coverage can't be "
-                    "measured.\n\n" + r.detail)
-    return rerun
+
+    def without_flaky() -> int:
+        shutil.rmtree(results, ignore_errors=True)
+        return run_dotnet_test(g, results, dotnet_flaky_filter(g))
+
+    return report_failures(g, r, verdicts, code, without_flaky)
 
 
-def run_dotnet_test(g: Gate, results: Path, with_coverage: bool, extra: tuple = ()) -> int:
+def run_dotnet_test(g: Gate, results: Path, test_filter: str | None = None) -> int:
     solution = g.gate_config.get("solution", "")
     command = ["dotnet", "test", *([solution] if solution else []), "--logger", "trx",
-               "--results-directory", str(results), *extra]
-    if with_coverage:
+               "--results-directory", str(results), *(["--filter", test_filter] if test_filter else [])]
+    if g.measures_coverage:
         command.append("--collect:XPlat Code Coverage;Format=json,cobertura")
-    code = g.run("tests", command, append=bool(extra))
-    if with_coverage:
+    code = g.run("tests", command, append=bool(test_filter))
+    if g.measures_coverage:
         g.coverage_reports = sorted(glob.glob(str(results / "**" / "coverage.cobertura.xml"), recursive=True))
         g.coverlet_reports = sorted(glob.glob(str(results / "**" / "coverage.json"), recursive=True))
         g.branches_measured = True
     return code
 
 
+# Files MSBuild or the SDK read for every project below them.
+DOTNET_SHARED_BUILD_FILE = re.compile(r"(?:^|/)(?:[^/]+\.(?:props|targets|sln|slnx)|global\.json|nuget\.config)$",
+                                      re.IGNORECASE)
+
+
 def classify_dotnet_failures(g: Gate, results: Path) -> dict:
     """{fully qualified test name: Verdict} for every failing test in the TRX reports; empty when a report doesn't say
     which test project a failure ran from, so the failure stays a plain one. Reachability is judged per project: a
     failure is flaky when no file of its test project, or of a project that one references directly or transitively,
-    changed since the base. A Reqnroll scenario's .feature file belongs to its test project, so the same rule holds."""
+    changed since the base. A Reqnroll scenario's .feature file belongs to its test project, so the same rule holds.
+    A build file outside every project folder (Directory.Build.props, global.json, a solution) belongs to every
+    project below its folder."""
     references = project_references(g)
     folders = {posixpath.dirname(p) or ".": p for p in references}
     changed = {}
@@ -749,13 +746,18 @@ def classify_dotnet_failures(g: Gate, results: Path) -> dict:
         owner = owner_of(path, set(folders))
         if owner in folders:
             changed.setdefault(folders[owner], []).append(path)
+        elif DOTNET_SHARED_BUILD_FILE.search(path):
+            above = posixpath.dirname(path)
+            for folder, project in folders.items():
+                if not above or folder == above or folder.startswith(above + "/"):
+                    changed.setdefault(project, []).append(path)
     verdicts = {}
     for name, assembly in failing_trx_tests(results):
         path = repo_path(g, assembly)
         project = folders.get(owner_of(path, set(folders))) if path else None
         if project is None:
             return {}
-        reached = reachable_projects(project, references)
+        reached = {project} | reachable(references, [project])
         edited = sorted(f for p in reached for f in changed.get(p, []))
         if edited:
             verdicts[name] = Verdict(False, f"{project} reaches files changed on this branch: {', '.join(edited)}")
@@ -797,19 +799,14 @@ def repo_path(g: Gate, path: str) -> str | None:
         return None
 
 
-def reachable_projects(project: str, references: dict) -> set:
-    reached, pending = set(), [project]
-    while pending:
-        current = pending.pop()
-        if current not in reached:
-            reached.add(current)
-            pending.extend(references.get(current, []))
-    return reached
-
-
 def dotnet_flaky_filter(g: Gate) -> str:
     """A VSTest filter that leaves out the tests classified flaky."""
     return "&".join("FullyQualifiedName!=" + re.sub(r"([\\()&|=!~])", r"\\\1", name) for name in g.flaky_tests)
+
+
+def dotnet_flaky_env(g: Gate) -> dict | None:
+    """The environment that hands a Stryker.NET override the filter leaving out the flaky tests."""
+    return {"ATDD_FLAKY_TEST_FILTER": dotnet_flaky_filter(g)} if g.flaky_tests else None
 
 
 class Verdict(NamedTuple):
@@ -836,24 +833,22 @@ def classify_failures(g: Gate, junit: Path) -> dict:
     if not all(path for _, path in failing):
         return {}
     graph = PythonImportGraph(g)
-    changed_production = set(g.code_files())
     changed_features = sorted(f for f in g.changed if f.endswith(".feature"))
     verdicts = {}
     for case, path in failing:
         files = [path] + conftests_above(g, path)
         reached = graph.reachable_from(files)
-        test_side = sorted(set(files) | (reached - graph.production_paths))
-        verdicts[node_id(case, path)] = judge_failure(g, path, test_side, sorted(reached & graph.production_paths),
-                                                      changed_production,
-                                                      graph.bound_features(test_side, changed_features))
+        test_code = set(files) | (reached - graph.production_paths)
+        test_side = sorted(test_code | set(graph.bound_features(sorted(test_code), changed_features)))
+        verdicts[node_id(case, path)] = judge_failure(g, path, test_side, sorted(reached & graph.production_paths))
     return verdicts
 
 
-def judge_failure(g: Gate, path: str, test_side: list, reached_production: list, changed_production: set,
-                  edited_elsewhere: list = ()) -> Verdict:
+def judge_failure(g: Gate, path: str, test_side: list, reached_production: list) -> Verdict:
     """Flaky when no file on the test side was added or changed on this branch and no production file the test
     reaches was changed."""
-    edited = [f for f in test_side if f in g.changed or g.is_new_file(f)] + list(edited_elsewhere)
+    edited = [f for f in test_side if f in g.changed or g.is_new_file(f)]
+    changed_production = set(g.code_files())
     hit = [f for f in reached_production if f in changed_production]
     if edited:
         return Verdict(False, f"{', '.join(edited)} added or changed on this branch")
@@ -1590,11 +1585,15 @@ def check_mutation(g: Gate, r: Result) -> None:
             return
         high, low = max(limit, 90), limit
         shutil.rmtree(out, ignore_errors=True)
-        command = override or (
-            f"dotnet stryker --solution {shlex.quote(solution)} --since:{g.base} -r json -r cleartext -r progress "
-            f"--threshold-high {high} --threshold-low {low} --break-at {limit} -O {shlex.quote(str(out))}"
-            + stryker_config_without_flaky_tests(g))
-        code = g.run("mutation", command, env={"ATDD_FLAKY_TEST_FILTER": dotnet_flaky_filter(g)} if g.flaky_tests else None)
+        try:
+            command = override or (
+                f"dotnet stryker --solution {shlex.quote(solution)} --since:{g.base} -r json -r cleartext -r progress "
+                f"--threshold-high {high} --threshold-low {low} --break-at {limit} -O {shlex.quote(str(out))}"
+                + write_stryker_net_config(g, "stryker-config.json", dotnet_flaky_filter(g)))
+        except GateError as error:
+            r.status, r.detail = "fail", str(error)
+            return
+        code = g.run("mutation", command, env=dotnet_flaky_env(g))
         report = out / "reports" / "mutation-report.json"
     elif g.node:
         incremental = g.root / ".atdd" / "cache" / "stryker-incremental.json"
@@ -1604,9 +1603,10 @@ def check_mutation(g: Gate, r: Result) -> None:
         command = override or (
             f"npx --no-install stryker run --mutate {shlex.quote(','.join(glob_literal(f) for f in files))} "
             f"--reporters json,clear-text,progress --incremental --incrementalFile {shlex.quote(str(incremental))}")
-        if g.unit_test_files_without_flaky and not override:
-            command += f" --testFiles {shlex.quote(','.join(g.unit_test_files_without_flaky))}"
-        code = g.run("mutation", command)
+        test_files = ",".join(unit_test_files_without_flaky(g))
+        if test_files and not override:
+            command += f" --testFiles {shlex.quote(test_files)}"
+        code = g.run("mutation", command, env={"ATDD_TEST_FILES_WITHOUT_FLAKY": test_files} if test_files else None)
     else:
         if not g.has_tool("mutmut"):
             r.status, r.detail = "fail", "mutmut isn't installed (pip install mutmut)."
@@ -1654,20 +1654,26 @@ def check_mutation(g: Gate, r: Result) -> None:
                     + "\n".join(result["survivors"][:40]))
 
 
-def stryker_config_without_flaky_tests(g: Gate) -> str:
-    """Stryker.NET takes a test filter only from its config file, so when tests were classified flaky this writes a
-    copy of the repo's stryker-config.json with a filter leaving them out and returns the option that points at it."""
-    if not g.flaky_tests:
+def write_stryker_net_config(g: Gate, name: str, *filters: str) -> str:
+    """Stryker.NET before 5.1 takes a test filter only from a config file, so this writes <out>/<name>: a copy of the
+    repo's stryker-config.json (the one Stryker.NET reads from the repo root) with these VSTest filters joined to the
+    one it sets. Returns the option that points Stryker.NET at it; empty when there's no filter to add."""
+    if not any(filters):
         return ""
     repo_config = g.root / "stryker-config.json"
+    yaml = [n for n in ("stryker-config.yaml", "stryker-config.yml") if (g.root / n).is_file()]
+    if yaml and not repo_config.is_file():
+        raise GateError(f"{yaml[0]} is YAML, which the gate can't extend with a test filter. Convert it to "
+                        "stryker-config.json, or set the gate.commands override and apply $ATDD_FLAKY_TEST_FILTER "
+                        "in it yourself.")
     try:
         config = json.loads(repo_config.read_text(encoding="utf-8")) if repo_config.is_file() else {}
     except (OSError, json.JSONDecodeError) as error:
-        raise GateError(f"Can't read stryker-config.json ({error}), so the flaky tests can't be left out") from None
+        raise GateError(f"Can't read stryker-config.json ({error}), so the gate can't add its test filter.") from None
     settings = config.setdefault("stryker-config", {})
-    existing = settings.get("test-case-filter")
-    settings["test-case-filter"] = f"({existing})&{dotnet_flaky_filter(g)}" if existing else dotnet_flaky_filter(g)
-    path = g.out / "stryker-config.json"
+    parts = [f for f in (settings.get("test-case-filter"), *filters) if f]
+    settings["test-case-filter"] = parts[0] if len(parts) == 1 else "&".join(f"({p})" for p in parts)
+    path = g.out / name
     path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
     return f" -f {shlex.quote(g.rel(path))}"
 
@@ -1676,7 +1682,11 @@ def without_flaky_tests(g: Gate) -> dict:
     """Environment that makes every pytest run, mutmut's included, deselect the tests classified flaky."""
     if not g.flaky_tests:
         return {}
-    return appended_to_environment("PYTEST_ADDOPTS", " ".join(f"--deselect {shlex.quote(t)}" for t in g.flaky_tests))
+    return appended_to_environment("PYTEST_ADDOPTS", " ".join(flaky_deselections(g)))
+
+
+def flaky_deselections(g: Gate) -> list:
+    return [f"--deselect {shlex.quote(t)}" for t in g.flaky_tests]
 
 
 def appended_to_environment(name: str, value: str, separator: str = " ") -> dict:
@@ -1965,37 +1975,37 @@ class GateError(Exception):
     """A check can't measure what it should: the check fails with this message."""
 
 
-def run_node_tests(g: Gate, r: Result, with_coverage: bool) -> int:
+def run_node_tests(g: Gate, r: Result) -> int:
     """Unit and acceptance tests, with their failures classified. In full mode every place the code runs records V8
     coverage under <out>/coverage (see scripts/atdd/coverage.mjs), which then merges it into one Cobertura report; when
     every failure is flaky, the tests run again without them first, so the coverage leaves them out."""
     commands = [c for c in (g.configured_command("unitTests"), g.configured_command("acceptanceTests")) if c] or ["npm test"]
     coverage = g.out / "coverage"
     merger = g.root / "scripts" / "atdd" / "coverage.mjs"
-    if with_coverage and not merger.exists():
+    if g.measures_coverage and not merger.exists():
         g.log_path("tests").write_text("scripts/atdd/coverage.mjs is missing, so coverage can't be measured; run /atdd:init.\n",
                                        encoding="utf-8")
         return 1
     runs = [NodeTestRun(command, node_runner(command), g.out / f"test-report-{index}.json")
             for index, command in enumerate(commands)]
-    codes = run_node_commands(g, runs, with_coverage)
+    codes = run_node_commands_with_reports(g, runs)
     code = max(codes)
     if code != 0:
         try:
-            failures = [failure for run, run_code in zip(runs, codes) if run_code != 0 for failure in node_failures(g, run)]
-            verdicts = classify_node_failures(g, failures)
+            g.failing_node_tests = [failure for run, run_code in zip(runs, codes) if run_code != 0
+                                    for failure in node_failures(g, run)]
+            verdicts = classify_node_failures(g, g.failing_node_tests)
         except GateError as error:
             r.detail = f"Can't tell whether the failures are flaky: {error}"
-            failures, verdicts = [], {}
+            verdicts = {}
 
         def without_flaky() -> int:
             shutil.rmtree(coverage, ignore_errors=True)
-            return max(run_node_commands(g, runs, with_coverage, failures))
+            return max(g.run("tests", run.command + node_exclusion(g, run), append=True, env=node_test_env(g, run))
+                       for run in runs)
 
-        code = report_failures(g, r, verdicts, code, with_coverage, without_flaky)
-        if r.status == "flaky":
-            g.unit_test_files_without_flaky = unit_test_files_without(g, runs, failures)
-    if with_coverage:
+        code = report_failures(g, r, verdicts, code, without_flaky)
+    if g.measures_coverage:
         code = max(code, g.run("tests", "node scripts/atdd/coverage.mjs merge", append=True,
                                env={"ATDD_COVERAGE_DIR": str(coverage)}))
         g.coverage_reports = [str(coverage / "merged" / "cobertura-coverage.xml")]
@@ -2029,24 +2039,25 @@ def node_runner(command: str) -> str | None:
     return next((name for name, pattern in NODE_RUNNERS if re.search(pattern, last)), None)
 
 
-def run_node_commands(g: Gate, runs: list, with_coverage: bool, excluded: list | None = None) -> list:
-    """Each command's exit code. The first run writes every known runner's report; a rerun (excluded given, the
-    NodeFailures to leave out) appends to the log and leaves those tests out."""
+def run_node_commands_with_reports(g: Gate, runs: list) -> list:
+    """Each command's exit code, with every known runner writing its report to run.report."""
     codes = []
     for index, run in enumerate(runs):
-        command, env = run.command, {"ATDD_COVERAGE_DIR": str(g.out / "coverage") if with_coverage else ""}
-        if with_coverage and g.stack == "typescript" and not re.search(r"\bvitest\b", run.command):
-            env["NODE_V8_COVERAGE"] = str(g.out / "coverage" / "node-v8")
-        names = [failure.name for failure in excluded or [] if failure.run == run]
-        if names:
-            command += node_exclusion(run.runner, names)
-        elif excluded is None and run.runner:
+        command, env = run.command, node_test_env(g, run)
+        if run.runner:
             run.report.unlink(missing_ok=True)
             command += node_report_option(run)
             if run.runner == "playwright":
                 env["PLAYWRIGHT_JSON_OUTPUT_FILE"] = str(run.report)
-        codes.append(g.run("tests", command, append=excluded is not None or index > 0, env=env))
+        codes.append(g.run("tests", command, append=index > 0, env=env))
     return codes
+
+
+def node_test_env(g: Gate, run: NodeTestRun) -> dict:
+    env = {"ATDD_COVERAGE_DIR": str(g.out / "coverage") if g.measures_coverage else ""}
+    if g.measures_coverage and g.stack == "typescript" and not re.search(r"\bvitest\b", run.command):
+        env["NODE_V8_COVERAGE"] = str(g.out / "coverage" / "node-v8")
+    return env
 
 
 def node_report_option(run: NodeTestRun) -> str:
@@ -2057,14 +2068,23 @@ def node_report_option(run: NodeTestRun) -> str:
             "playwright": " --reporter=list,json"}[run.runner]
 
 
-def node_exclusion(runner: str, names: list) -> str:
-    """Options that make the runner leave out the tests with these names."""
-    alternatives = "|".join(re.escape(name) for name in sorted(set(names)))
-    if runner == "playwright":
+def node_exclusion(g: Gate, run: NodeTestRun) -> str:
+    """Options that make the run's runner leave out its tests classified flaky; empty when it has none."""
+    names = sorted({f.name for f in g.failing_node_tests if f.run == run and f.test in g.flaky_tests})
+    if not names:
+        return ""
+    alternatives = "|".join(re.escape(name) for name in names)
+    if run.runner == "playwright":
         pattern = r"(?:^|\s)(?:" + alternatives + r")(?:\s|$)"
         return f" --grep-invert {shlex.quote(pattern)} --pass-with-no-tests"
-    option = "--name" if runner == "cucumber" else "-t"
+    option = "--name" if run.runner == "cucumber" else "-t"
     return f" {option} {shlex.quote(f'^(?!(?:{alternatives})$)')}"
+
+
+def node_command_without_flaky(g: Gate, command: str) -> str:
+    """The test command with options that leave out the tests it ran that were classified flaky."""
+    runs = {f.run for f in g.failing_node_tests if f.run.command == command}
+    return command + "".join(node_exclusion(g, run) for run in runs)
 
 
 def node_failures(g: Gate, run: NodeTestRun) -> list:
@@ -2080,8 +2100,9 @@ def node_failures(g: Gate, run: NodeTestRun) -> list:
             failures = playwright_failures(g, run, json.loads(text))
         else:
             failures = jest_failures(g, run, json.loads(text))
-    except (OSError, ValueError, KeyError, TypeError):
-        failures = []
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        raise GateError(f"`{run.command}` failed, and its report {g.rel(run.report)} can't be read "
+                        f"({type(error).__name__}: {error}).") from None
     if not failures:
         raise GateError(f"`{run.command}` failed, but its report names no failing test to tell apart.")
     return failures
@@ -2091,6 +2112,7 @@ def jest_failures(g: Gate, run: NodeTestRun, report: dict) -> list:
     """From Vitest's or Jest's JSON report. A file that fails outside its tests (an import error, say) has no test to
     tell apart, so it makes every failure a plain one."""
     separator = " > " if run.runner == "vitest" else " "
+    setup = setup_files(g, run)
     failures = []
     for result in report["testResults"]:
         path = repo_path(g, result["name"])
@@ -2099,8 +2121,63 @@ def jest_failures(g: Gate, run: NodeTestRun, report: dict) -> list:
             return []
         for assertion in failed:
             name = separator.join([*assertion.get("ancestorTitles", []), assertion["title"]])
-            failures.append(NodeFailure(run, f"{path}::{name}", name, path, (path,), ()))
+            failures.append(NodeFailure(run, f"{path}::{name}", name, path, (path, *setup), ()))
     return failures
+
+
+RUNNER_CONFIG_NAMES = {"vitest": ("vitest.config", "vite.config"), "jest": ("jest.config",)}
+RUNNER_CONFIG_EXTENSIONS = (".ts", ".mts", ".cts", ".js", ".mjs", ".cjs", ".json")
+SETUP_KEYS = {"vitest": ("setupFiles", "globalSetup"),
+              "jest": ("setupFiles", "setupFilesAfterEnv", "globalSetup", "globalTeardown")}
+STRING_LITERAL = r"""'([^'\\]*)'|"([^"\\]*)"|`([^`\\$]*)`"""
+SETUP_VALUE = re.compile(rf"""\s*(?:\[(?:\s*(?:{STRING_LITERAL})\s*,?)*\s*\]|{STRING_LITERAL})""")
+
+
+def setup_files(g: Gate, run: NodeTestRun) -> tuple:
+    """The repo files a Vitest or Jest run loads before every test file, because its config names them as setup or
+    global setup files; a GateError when the config names them in a way the gate can't read."""
+    config = runner_config(g, run)
+    if config is None:
+        return ()
+    text = config.read_text(encoding="utf-8")
+    if config.name == "package.json":
+        text = json.dumps(json.loads(text).get("jest") or {})
+    names = []
+    for key in SETUP_KEYS[run.runner]:
+        for match in re.finditer(rf"""\b{key}["']?\s*:""", text):
+            value = SETUP_VALUE.match(text, match.end())
+            if not value:
+                raise GateError(f"{g.rel(config)} sets {key} to something other than string literals, so the gate "
+                                "can't tell which setup files the tests load.")
+            names += ["".join(groups) for groups in re.findall(STRING_LITERAL, value.group(0))]
+    return tuple(sorted({path for name in names if (path := setup_file_path(g, config, name))}))
+
+
+def runner_config(g: Gate, run: NodeTestRun) -> Path | None:
+    """The config file the run's Vitest or Jest reads: the one its --config names, else the first default one."""
+    last = shlex.split(re.split(r"&&|\|\||;", run.command)[-1])
+    named = next((last[i + 1] for i, word in enumerate(last[:-1]) if word in ("--config", "-c")), None)
+    named = named or next((word.split("=", 1)[1] for word in last if word.startswith("--config=")), None)
+    if named:
+        return g.root / named
+    candidates = [g.root / f"{name}{extension}" for name in RUNNER_CONFIG_NAMES[run.runner]
+                  for extension in RUNNER_CONFIG_EXTENSIONS]
+    package = g.root / "package.json"
+    if run.runner == "jest" and package.is_file() and "jest" in json.loads(package.read_text(encoding="utf-8")):
+        candidates.append(package)
+    return next((c for c in candidates if c.is_file()), None)
+
+
+def setup_file_path(g: Gate, config: Path, name: str) -> str | None:
+    """The repo path of a setup file the config names; None for a package. A path the gate can't find is a GateError."""
+    relative = name.replace("<rootDir>", ".")
+    base = config.parent / relative
+    for candidate in (base, *(base.with_name(base.name + e) for e in (".ts", ".tsx", ".mts", ".js", ".jsx", ".mjs"))):
+        if candidate.is_file():
+            return repo_path(g, str(candidate))
+    if relative.startswith((".", "/")):
+        raise GateError(f"{g.rel(config)} names the setup file {name}, which the gate can't find.")
+    return None
 
 
 def cucumber_failures(run: NodeTestRun, text: str) -> list:
@@ -2182,8 +2259,9 @@ def node_step_matches(definition: StepDefinition, step: str) -> bool:
     pattern = definition.text if definition.kind == "regex" else cucumber_expression_regex(definition.text)
     try:
         return re.search(pattern, step) is not None
-    except re.error:
-        return True
+    except re.error as error:
+        raise GateError(f"The step definition at {definition.location} has a pattern Python's re can't compile "
+                        f"({error}): {pattern}") from None
 
 
 CUCUMBER_PARAMETERS = {
@@ -2218,13 +2296,11 @@ def classify_node_failures(g: Gate, failures: list) -> dict:
     module graph leads from it to no production file this branch changed."""
     graph = node_module_graph(g, sorted({entry for failure in failures for entry in failure.entries}))
     production = set(g.production_files())
-    changed_production = set(g.code_files())
     verdicts = {}
     for failure in failures:
         reached = reachable(graph, failure.entries)
         test_side = sorted(set(failure.entries) | set(failure.features) | (reached - production))
-        verdicts[failure.test] = judge_failure(g, failure.file, test_side, sorted(reached & production),
-                                               changed_production)
+        verdicts[failure.test] = judge_failure(g, failure.file, test_side, sorted(reached & production))
     return verdicts
 
 
@@ -2232,7 +2308,7 @@ def node_module_graph(g: Gate, entries: list) -> dict:
     """{repo file: [repo files it imports]} for the entries and everything they import, directly or not."""
     if not entries:
         return {}
-    modules = depcruise_modules(g, entries, minimal_depcruise_config(g), "flaky-tests")
+    modules = depcruise_modules(g, entries, write_minimal_depcruise_config(g), "flaky-tests")
     return {module.get("source", ""): [d.get("resolved", "") for d in module.get("dependencies", [])
                                        if in_repo(g, d.get("resolved", ""))] for module in modules}
 
@@ -2251,17 +2327,12 @@ def reachable(graph: dict, entries) -> set:
     return seen
 
 
-def unit_test_files_without(g: Gate, runs: list, failures: list) -> list:
+def unit_test_files_without_flaky(g: Gate) -> list:
     """The Vitest or Jest test files StrykerJS runs when some hold flaky tests: all the others. Empty when none does."""
-    flaky_files = {failure.file for failure in failures if failure.run.runner in UNIT_RUNNERS}
-    if not flaky_files:
-        return []
-    files = set()
-    for run in runs:
-        if run.runner in UNIT_RUNNERS:
-            files |= {repo_path(g, result["name"]) for result in
-                      json.loads(run.report.read_text(encoding="utf-8"))["testResults"]}
-    return sorted(f for f in files - flaky_files if f)
+    flaky = [f for f in g.failing_node_tests if f.test in g.flaky_tests and f.run.runner in UNIT_RUNNERS]
+    files = {repo_path(g, result["name"]) for run in {f.run for f in flaky}
+             for result in json.loads(run.report.read_text(encoding="utf-8"))["testResults"]}
+    return sorted(f for f in files - {f.file for f in flaky} if f)
 
 
 def node_audit_command(g: Gate) -> str:
@@ -2561,7 +2632,7 @@ def tracked(g: Gate, *patterns: str) -> list:
     return sorted(set(git(g.root, "ls-files", "-co", "--exclude-standard", "--", *patterns).splitlines()))
 
 
-def minimal_depcruise_config(g: Gate) -> str:
+def write_minimal_depcruise_config(g: Gate) -> str:
     """A dependency-cruiser config that only resolves modules, for following imports without the repo's rules."""
     config = g.out / "depcruise-atdd.cjs"
     ts_config = "tsConfig: { fileName: 'tsconfig.json' }, " if (g.root / "tsconfig.json").exists() else ""
@@ -2586,7 +2657,7 @@ def node_dependency_graphs(g: Gate, production: list):
     """Namespaces are directories; projects are the workspace packages (directories holding a package.json)."""
     dirs = [d.strip("/") for d in g.gate_config.get("sourceDirs", ["src"]) if (g.root / d.strip("/")).exists()]
     configs = [n for n in DEPCRUISE_CONFIGS if (g.root / n).exists()]
-    modules = depcruise_modules(g, dirs, configs[0] if configs else minimal_depcruise_config(g), "dependency-cycles")
+    modules = depcruise_modules(g, dirs, configs[0] if configs else write_minimal_depcruise_config(g), "dependency-cycles")
     known = set(production)
     if not any(m.get("source") in known for m in modules):
         raise GateError("dependency-cruiser's module graph contains none of the production files in sourceDirs, so cycles "
@@ -2947,6 +3018,7 @@ def check_acceptance_mutation(g: Gate, r: Result) -> None:
         python_acceptance_mutation(g, r, targets, override)
         return
     configured_report = g.gate_config.get("acceptanceMutationReport")
+    env = None
     if g.stack == "dotnet":
         solution = g.gate_config.get("solution", "")
         if not solution and not override:
@@ -2956,9 +3028,15 @@ def check_acceptance_mutation(g: Gate, r: Result) -> None:
         shutil.rmtree(out, ignore_errors=True)
         test_filter = g.gate_config.get("acceptanceTestFilter", "FullyQualifiedName~Acceptance")
         mutate = " ".join(f"-m {shlex.quote('**/' + Path(t).name)}" for t in targets)
-        command = override or (
-            f"dotnet stryker --solution {shlex.quote(solution)} {mutate} --test-case-filter {shlex.quote(test_filter)} "
-            f"-r json -r cleartext -r progress -O {shlex.quote(str(out))}")
+        try:
+            command = override or (
+                f"dotnet stryker --solution {shlex.quote(solution)} {mutate} -r json -r cleartext -r progress "
+                f"-O {shlex.quote(str(out))}"
+                + write_stryker_net_config(g, "acceptance-stryker-config.json", test_filter, dotnet_flaky_filter(g)))
+        except GateError as error:
+            r.status, r.detail = "fail", str(error)
+            return
+        env = dotnet_flaky_env(g)
         report = out / "reports" / "mutation-report.json"
     else:
         acceptance = g.configured_command("acceptanceTests")
@@ -2972,13 +3050,14 @@ def check_acceptance_mutation(g: Gate, r: Result) -> None:
         # The command runner runs the whole acceptance suite per mutant. StrykerJS's Cucumber runner would be faster,
         # but 10.1 can't load its formatter in Cucumber 13, which splits the file: URL it passes at the colon.
         command = override or (
-            f"npx --no-install stryker run --testRunner command --commandRunner.command {shlex.quote(acceptance)} "
+            f"npx --no-install stryker run --testRunner command "
+            f"--commandRunner.command {shlex.quote(node_command_without_flaky(g, acceptance))} "
             f"--mutate {shlex.quote(','.join(glob_literal(t) for t in targets))} --reporters json,clear-text,progress "
             f"--incremental --incrementalFile {shlex.quote(str(incremental))}")
     if configured_report:
         report = g.root / configured_report
     report.unlink(missing_ok=True)
-    code = g.run("acceptance-mutation", command)
+    code = g.run("acceptance-mutation", command, env=env)
     r.log = g.rel(g.log_path("acceptance-mutation"))
     if not report.exists():
         r.status, r.detail = "fail", (f"Mutation testing didn't produce a report (exit {code}):\n"
@@ -3018,7 +3097,7 @@ def python_acceptance_mutation(g: Gate, r: Result, targets: list, override: str 
     (plugin_dir / "atdd_acceptance_only.py").write_text(ACCEPTANCE_ONLY_PLUGIN, encoding="utf-8")
     env = {
         "PYTHONPATH": os.pathsep.join(p for p in (str(plugin_dir), os.environ.get("PYTHONPATH", "")) if p),
-        **appended_to_environment("PYTEST_ADDOPTS", "-p atdd_acceptance_only"),
+        **appended_to_environment("PYTEST_ADDOPTS", " ".join(["-p atdd_acceptance_only", *flaky_deselections(g)])),
         "ATDD_ACCEPTANCE_DIR": g.gate_config.get("acceptanceTestsDir", "tests/acceptance"),
     }
     modules = sorted({python_module(t) for t in targets})
@@ -3073,7 +3152,7 @@ def report_acceptance_mutants(g: Gate, r: Result, summary: dict, diffs: Path | N
                     + ":\n" + "\n".join(survivors[:40]))
 
 
-FLAKY_EXCLUDED_FROM = ("diff-coverage", "mutation")
+FLAKY_EXCLUDED_FROM = ("diff-coverage", "mutation", "acceptance-mutation")
 
 CHECKS = {
     "production-untouched": check_production_untouched,
