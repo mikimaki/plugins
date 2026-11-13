@@ -44,8 +44,8 @@ The repo's `.claude/atdd.json` → `commands.qaUp` / `qaDown` and `qa.*` tell yo
 
    Don't run the automated test suite and call it QA. The point is to bypass it.
 
-   **Idle waits:** a single idle wait over 2 minutes means skip and report the scenario, with a reason naming the trigger and its length when known. Slow loads, long calculations and other long active work are never a reason to skip: run them in the background and monitor them. The playbook's "Idle waits" defines both and has the rest of the rule.
-3. **Save one replay script per scenario, passed or failed,** in `.atdd/<issue-key>/qa/scenarios/`, overwriting last round's, as the playbook's "Replay scripts" describes. Evidence for findings stays in the round's evidence directory.
+   A single idle wait over 2 minutes means skip and report the scenario. Slow work is never a reason to skip. The playbook's "Idle waits" has the rule.
+3. **Save one replay script per scenario, passed or failed,** in `.atdd/<issue-key>/qa/scenarios/`, overwriting last round's, as the playbook's "Replay scripts" describes. A skipped scenario gets none. Evidence for findings stays in the round's evidence directory.
 4. **Explore around the change** with the playbook's heuristics:
    - boundaries;
    - invalid and hostile input;

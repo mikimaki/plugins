@@ -33,7 +33,7 @@ For each scenario in the feature directory:
 1. **Arrange the Given state the way a user or client would:** through the app's APIs or UI, or with the seeding approach in `qa.notes`. Don't use the test suite's helpers. Bypassing them is the point.
 2. **Perform the When**, and observe the Then with your own requests or eyes.
 3. **Record the result** in `<evidence-dir>/scenarios.md`: one line per scenario with pass, fail or skipped (with the reason) and a pointer to the evidence.
-4. **Save its replay script** in `.atdd/<key>/qa/scenarios/`, whether it passed or failed, overwriting last round's. A scenario skipped for an idle wait (see "Idle waits" below) gets none.
+4. **Save its replay script** in `.atdd/<key>/qa/scenarios/`, whether it passed or failed, overwriting last round's. A scenario skipped for an idle wait (see "Idle waits" below) gets none; if an earlier round left a replay script for it, delete that script from the scenarios folder so the replay command doesn't run it.
 
 **Replay scripts.** Every QA run leaves one replay script per scenario in `.atdd/<key>/qa/scenarios/`, so a later round replays all of them with the one command below:
 
