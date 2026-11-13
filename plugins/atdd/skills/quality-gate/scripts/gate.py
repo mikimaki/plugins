@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """ATDD quality gate: deterministic pass/fail checks over everything changed since the base commit.
 
-    python3 scripts/atdd/gate.py fast    # commit gate: build, format, lint, tests, steps, complexity, NPath, cycles, suppressions
-    python3 scripts/atdd/gate.py full    # adds diff coverage, mutation, duplication, architecture, dead code, ...
+    python3 scripts/atdd/gate.py fast    # commit gate: build, format, lint, tests, steps, complexity, NPath, cycles,
+                                         # suppressions, duplication, architecture, dead code, locked files
+    python3 scripts/atdd/gate.py full    # adds diff coverage, mutation and vulnerable dependencies
     python3 scripts/atdd/gate.py full --only mutation,diff-coverage
     python3 scripts/atdd/gate.py cover-fast   # /atdd:cover's commit gate: only test files changed, and they're sound
     python3 scripts/atdd/gate.py cover-full   # adds duplication, locked files, and the acceptance tests' own coverage and
@@ -63,10 +64,11 @@ DEFAULT_THRESHOLDS = {
     "parameters": 5,
 }
 
+# Duplication, architecture, dead-code and locked-files each took about a second or less on the TypeScript, Python
+# and .NET fixtures, so the commit gate runs them too. The full-only checks are the slow ones.
 FAST_CHECKS = ["build", "format", "lint", "tests", "undefined-steps", "complexity", "cognitive", "npath",
-               "dependency-cycles", "suppressions"]
-FULL_CHECKS = FAST_CHECKS + ["diff-coverage", "mutation", "duplication", "architecture", "dead-code",
-                             "vulnerabilities", "locked-files"]
+               "dependency-cycles", "suppressions", "duplication", "architecture", "dead-code", "locked-files"]
+FULL_CHECKS = FAST_CHECKS + ["diff-coverage", "mutation", "vulnerabilities"]
 COVER_FAST_CHECKS = ["production-untouched", "build", "format", "lint", "tests", "undefined-steps", "duplicate-steps",
                      "complexity", "cognitive", "npath", "suppressions"]
 COVER_FULL_CHECKS = COVER_FAST_CHECKS + ["duplication", "locked-files", "acceptance-coverage", "acceptance-mutation"]

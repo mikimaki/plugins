@@ -1,8 +1,10 @@
 # Tests for the workflows
 
-Three kinds, besides the eval cases in `../evals/`:
+Four kinds, besides the eval cases in `../evals/`:
 
 - **`guard/`**: `scripts/atdd_guard.py` fed synthetic PreToolUse payloads in a throwaway repo: who may edit, commit, push, rebase and open pull requests, and which foreground waits QA may run. `python3 tests/guard/guard_test.py`
+
+- **`gate/`**: the quality gate's command line, in fast and full mode, against a throwaway Python repo built by `fixture.py` from the eval app below; asserts on `report.json`. No model calls; needs the Python stack's tools (see `skills/quality-gate/references/python.md`) and Node.js. `PATH="<venv>/bin:$PATH" python3 tests/gate/gate_test.py`
 
 - **`workflows/`**: the workflow scripts' control flow, with `agent()` and `workflow()` mocked. Fast, no model calls.
 
