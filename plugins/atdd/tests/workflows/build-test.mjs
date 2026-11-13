@@ -78,3 +78,62 @@ const qaPrompts = calls => calls.filter(c => c.opts.agentType === 'atdd:qa').map
   assert.doesNotMatch(prompts[1], /\bc[23]\b/)
   console.log('QA last tested survives review and quality failures ok')
 }
+const skip = (scenario, reason) => ({ scenario, reason })
+const qaPass = (...skipped) => ({ ...pass, skipped })
+const qaFail = (id, ...skipped) => ({ ...fail(id), skipped })
+// QA reports skipped scenarios, each with its reason; the other stages don't
+{
+  const { calls } = await run(B, { args: 'PROJ-45', agent: make({ 'atdd:preparer': [prep], 'atdd:implementer': [impl('c1')], 'atdd:reviewer': [pass], 'atdd:quality-tester': [pass], 'atdd:qa': [qaPass()] }) })
+  const { schema } = calls.find(c => c.opts.agentType === 'atdd:qa').opts
+  assert.ok(schema.required.includes('skipped'))
+  assert.deepEqual(schema.properties.skipped.items.required, ['scenario', 'reason'])
+  for (const c of calls.filter(c => ['atdd:reviewer', 'atdd:quality-tester'].includes(c.opts.agentType))) assert.equal(c.opts.schema.properties.skipped, undefined)
+  console.log('QA skipped schema ok')
+}
+const qaLines = logs => logs.filter(l => /: QA /.test(l))
+// one line per QA run: its verdict and only the scenarios no earlier QA run skipped; skipping doesn't fail the run
+{
+  const digest = skip('Nightly digest is sent', 'idle wait: nightly cron at 02:00 (~11h)')
+  const lockout = skip('Locked account opens again', 'idle wait: 15-minute lockout expiry')
+  const { result, logs } = await run(B, { args: 'PROJ-45', agent: make({
+    'atdd:preparer': [prep],
+    'atdd:implementer': [impl('c1'), impl('c2'), impl('c3')],
+    'atdd:reviewer': [pass, pass, pass],
+    'atdd:quality-tester': [pass, pass, pass],
+    'atdd:qa': [qaFail('login', digest), qaFail('login', digest, lockout), qaPass(digest, lockout)],
+  }) })
+  assert.equal(result.status, 'done')
+  assert.deepEqual(qaLines(logs), [
+    'Round 1: QA raised 1 blocking finding(s); back to the implementer. Newly skipped: "Nightly digest is sent" (idle wait: nightly cron at 02:00 (~11h)).',
+    'Round 2: QA raised 1 blocking finding(s); back to the implementer. Newly skipped: "Locked account opens again" (idle wait: 15-minute lockout expiry).',
+    'Round 3: QA passed. Nothing new skipped.',
+  ])
+  console.log('QA log lines ok')
+}
+// the final report lists every scenario skipped across the build once, as unverified, apart from advisory findings
+{
+  const digest = skip('Nightly digest is sent', 'idle wait: nightly cron at 02:00 (~11h)')
+  const lockout = skip('Locked account opens again', 'idle wait: 15-minute lockout expiry')
+  const nit = { verdict: 'pass', findings: [{ id: 'typo', severity: 'nit', title: 'typo', detail: '' }], summary: 'ok', skipped: [digest] }
+  const done = await run(B, { args: 'PROJ-45', agent: make({ 'atdd:preparer': [prep], 'atdd:implementer': [impl('c1'), impl('c2')], 'atdd:reviewer': [pass, pass], 'atdd:quality-tester': [pass, pass], 'atdd:qa': [qaFail('login', digest), nit] }) })
+  assert.equal(done.result.status, 'done')
+  assert.deepEqual(done.result.unverified, [digest])
+  assert.deepEqual(done.result.advisory.map(f => f.id), ['typo'])
+  const stuck = await run(B, { args: 'PROJ-45', agent: make({ 'atdd:preparer': [{ ...prep, maxRounds: 2 }], 'atdd:implementer': [impl('c1'), impl('c2')], 'atdd:reviewer': [pass, pass], 'atdd:quality-tester': [pass, pass], 'atdd:qa': [qaFail('login', digest), qaFail('login', lockout, digest)] }) })
+  assert.equal(stuck.result.status, 'needs-human')
+  assert.deepEqual(stuck.result.unverified, [digest, lockout])
+  const clean = await run(B, { args: 'PROJ-45', agent: make({ 'atdd:preparer': [prep], 'atdd:implementer': [impl('c1')], 'atdd:reviewer': [pass], 'atdd:quality-tester': [pass], 'atdd:qa': [qaPass()] }) })
+  assert.deepEqual(clean.result.unverified, [])
+  console.log('unverified list ok')
+}
+// a later QA prompt names the scenarios skipped earlier, which have no replay script, and points to the playbook for them
+{
+  const digest = skip('Nightly digest is sent', 'idle wait: nightly cron at 02:00 (~11h)')
+  const { calls } = await run(B, { args: 'PROJ-45', agent: make({ 'atdd:preparer': [prep], 'atdd:implementer': [impl('c1'), impl('c2')], 'atdd:reviewer': [pass, pass], 'atdd:quality-tester': [pass, pass], 'atdd:qa': [qaFail('login', digest), qaPass(digest)] }) })
+  const [first, second] = qaPrompts(calls)
+  assert.doesNotMatch(first, /skipped/i)
+  assert.match(second, /skipped in an earlier round/)
+  assert.match(second, /"Nightly digest is sent" \(idle wait: nightly cron at 02:00 \(~11h\)\)/)
+  assert.match(second, /playbook's "Later rounds"/)
+  console.log('later QA prompt names earlier skips ok')
+}

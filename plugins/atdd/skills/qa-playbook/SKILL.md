@@ -32,8 +32,8 @@ For each scenario in the feature directory:
 
 1. **Arrange the Given state the way a user or client would:** through the app's APIs or UI, or with the seeding approach in `qa.notes`. Don't use the test suite's helpers. Bypassing them is the point.
 2. **Perform the When**, and observe the Then with your own requests or eyes.
-3. **Record the result** in `<evidence-dir>/scenarios.md`: one line per scenario with pass or fail and a pointer to the evidence.
-4. **Save its replay script** in `.atdd/<key>/qa/scenarios/`, whether it passed or failed, overwriting last round's.
+3. **Record the result** in `<evidence-dir>/scenarios.md`: one line per scenario with pass, fail or skipped (with the reason) and a pointer to the evidence.
+4. **Save its replay script** in `.atdd/<key>/qa/scenarios/`, whether it passed or failed, overwriting last round's. A scenario skipped for an idle wait (see "Idle waits" below) gets none.
 
 **Replay scripts.** Every QA run leaves one replay script per scenario in `.atdd/<key>/qa/scenarios/`, so a later round replays all of them with the one command below:
 
@@ -88,7 +88,20 @@ A scenario whose script fails shows in the output by file name.
 
 Without the MCP tools, run the scenario's `.mjs` replay script with `node` directly. Either way, save the scenario's replay script in the scenarios folder.
 
-**Time-dependent scenarios:** use the app's test clock if `qa.notes` names one. Otherwise test what you can with data timestamps, and mark the scenario `not manually verifiable: needs a controllable clock` (a minor finding).
+**Time-dependent scenarios:** use the app's test clock if `qa.notes` names one. With a test clock, fast-forward idle waits instead of skipping.
+
+**Idle waits.** An idle wait is time you spend after acting in a scenario during which the outcome depends only on a scheduled trigger in the app firing (a cron job, timer, delay, expiry or poll interval), not on work in progress.
+
+- **Idle** (skip if over 2 minutes): a nightly cron job; a queued job picked up by a worker that polls every 5 minutes; a 15-minute lockout or rate-limit cooldown; a token or record expiry.
+- **Active** (never skip): a page that takes 3 minutes to load; a report that takes 10 minutes to compute; a worker that picks a job up immediately and processes it for 5 minutes; an email or webhook through a provider with unknown delivery delay.
+
+The rule:
+
+1. **A single idle wait over 2 minutes means skip and report the scenario.** The limit applies to each idle wait on its own, not to the scenario as a whole: idle waits of 2 minutes or less are waited out in the background and verified normally, even if a scenario has several.
+2. **Slow is never a reason to skip.** Slow pages, long calculations, slow builds, slow startup and any other long active work run in the background (`run_in_background`), and you monitor them until they finish.
+3. **Find the trigger's schedule** in the code and config. If you can't, wait up to 2 minutes in the background. If the outcome hasn't appeared by then, skip with a reason saying the length is unknown, e.g. `idle wait: report poll, length unknown, nothing appeared within 2 minutes`.
+4. **The reason names the trigger and its length when known**, e.g. `idle wait: nightly cron at 02:00 (~11h)` or `idle wait: 15-minute lockout expiry`.
+5. **Record the skip** with its reason in `<evidence-dir>/scenarios.md` and in your result's `skipped` list. A skip is not a finding and doesn't fail your verdict. A skipped scenario has no replay script.
 
 ## 3. Explore around the change
 
@@ -171,6 +184,8 @@ When the prompt names the commit you last tested, sections 2 and 3 shrink to thr
 
 1. **Re-test every earlier finding by hand** first, rerunning its evidence.
 2. **Replay all saved scripts** with the replay command in section 2. Fixes often break neighbors. Hand-test only the scenarios that have no script, following the steps in last round's `scenarios.md`. Save fresh replay scripts as in section 2.
+
+   A scenario skipped earlier for an idle wait also has no script, but don't hand-test it: that would need the same wait. It stays skipped. Record it again in `scenarios.md` and in `skipped` with the same reason.
 3. **Explore only around** `git diff <last tested>..<commit under test>` and what it affects, with section 3's heuristics.
 
 - A replay failure of a scenario that passed before is a **blocker**. Attach the replay output as evidence.
