@@ -91,8 +91,10 @@ The TypeScript column covers Next.js too; where Next.js differs, the cell says s
 Zero dependency cycles isn't a threshold: it can't be configured.
 
 **Which checks run in each mode** comes from `gate.fast` / `gate.full`. When unset:
-- `fast`: build, format, lint, tests, undefined-steps, complexity, cognitive, npath, dependency-cycles, suppressions.
-- `full`: everything.
+- `fast`: build, format, lint, tests, undefined-steps, complexity, cognitive, npath, dependency-cycles, suppressions, duplication, architecture, dead-code, locked-files.
+- `full`: those, plus diff-coverage, mutation and vulnerabilities.
+
+Duplication, architecture, dead-code and locked-files took about a second or less each on the TypeScript, Python and .NET fixtures, so the commit hook runs them too. Duplication needs Node.js (`npx jscpd`) on every stack. A repo's `gate.fast` list replaces these defaults entirely.
 
 **Overriding a check's command.** `gate.commands.<check>` replaces the command a check runs: for example, a `testsWithCoverage` command for .NET 10 MTP repos, or `npath` and `dependencyCycles` for a tool of the repo's own. The override's exit code decides the result.
 

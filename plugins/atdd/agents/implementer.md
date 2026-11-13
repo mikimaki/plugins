@@ -1,6 +1,6 @@
 ---
 name: implementer
-description: ATDD implementer. Binds the approved Gherkin scenarios as executable acceptance tests, implements the feature until they pass, commits, and fixes findings from the reviewer, QA and quality-gate agents. Used by the /atdd:build workflow.
+description: ATDD implementer. Binds the approved Gherkin scenarios as executable acceptance tests, implements the feature until they pass, commits, and fixes findings from the reviewer, quality-gate and QA agents. Used by the /atdd:build workflow.
 skills:
   - atdd:gherkin-binding
   - atdd:coding-standards
@@ -10,8 +10,8 @@ skills:
 You implement one issue, acceptance-test first. The approved Gherkin scenarios are the definition of done. After you, three independent checks look at your work, in this order:
 
 1. a code reviewer;
-2. a QA engineer who uses the running app;
-3. a deterministic quality gate: mutation testing, complexity (cyclomatic, cognitive, NPath), dependency cycles, line and branch coverage of every changed line, architecture rules, duplication, suppressions.
+2. a deterministic quality gate: mutation testing, complexity (cyclomatic, cognitive, NPath), dependency cycles, line and branch coverage of every changed line, architecture rules, duplication, suppressions;
+3. a QA engineer who uses the running app.
 
 Whatever they flag comes back to you. The fastest way through is work that passes all three the first time.
 
@@ -56,7 +56,7 @@ The repo's `.claude/atdd.json` holds the commands: `fastChecks`, `acceptanceTest
 
 ## Fix rounds
 
-Each finding has an id and comes from the reviewer, QA or the quality gate.
+Each finding has an id and comes from the reviewer, the quality gate or QA.
 
 - **Fix the root cause, not the symptom.** For a surviving mutant, add the assertion that kills it, so that the behavior is pinned. For a QA failure, find out why the scenario passed in tests but failed against the real app. That gap usually means a step definition is lying.
 - **Answer each finding:**

@@ -37,17 +37,21 @@ def decide(root, mode, agent, tool_input):
     return ("deny", json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"]) if out.strip() else ("allow", "")
 
 
-COVERER, PREPARER, REVIEWER, QA = "atdd:acceptance-test-coverer", "atdd:preparer", "atdd:coverage-reviewer", "atdd:coverage-qa"
+COVERER, PREPARER, REVIEWER = "atdd:acceptance-test-coverer", "atdd:preparer", "atdd:coverage-reviewer"
+QA = "atdd:qa"
 failures = 0
 
 
-def case(root, expected, mode, agent, value, label, before=None):
+def case(root, expected, mode, agent, value, label, before=None, says=()):
     global failures
     if before:
         before(root)
-    tool_input = {"command": value} if mode in ("git", "gh") else {"file_path": str(root / value)}
+    if isinstance(value, dict):
+        tool_input = value
+    else:
+        tool_input = {"command": value} if mode in ("git", "gh", "wait") else {"file_path": str(root / value)}
     got, reason = decide(root, mode, agent, tool_input)
-    ok = got == expected
+    ok = got == expected and all(text in reason for text in says)
     failures += not ok
     print(f"{'PASS' if ok else 'FAIL'} {expected:5} {label}" + ("" if ok else f"  (got {got}: {reason[:120]})"))
 
@@ -135,8 +139,40 @@ with tempfile.TemporaryDirectory() as tmp:
     E("allow", "gh", REVIEWER, "gh pr view 12", "reviewer reads a PR")
     E("allow", "gh", PREPARER, "gh pr list --head atdd/cover-a01-x --json url", "preparer lists PRs")
     E("allow", "gh", PREPARER, "gh auth status", "preparer checks gh auth")
+    # wait guard: build QA never sits in a foreground wait over 2 minutes
+    GUIDANCE = ("background", "test clock", "qa.notes", "skip", "more than 2 minutes")
+    E("deny", "wait", QA, {"command": "npm run build", "timeout": 600000}, "QA runs a foreground command with a 10-minute timeout",
+      says=GUIDANCE)
+    E("allow", "wait", QA, {"command": "npm run build", "timeout": 120000}, "QA runs a foreground command with a 2-minute timeout")
+    E("deny", "wait", QA, "until curl -sf localhost:3000/health; do sleep 2; done", "QA polls with an until/sleep loop",
+      says=GUIDANCE)
+    E("deny", "wait", QA, "while ! grep -q ready app.log; do sleep 5; done", "QA polls with a while/sleep loop")
+    E("deny", "wait", QA, "for i in $(seq 1 60); do curl -sf localhost:3000 && break; sleep 1; done", "QA polls with a for/sleep loop")
+    E("deny", "wait", QA, "sleep 300 && curl -s localhost:3000/orders", "QA sleeps 5 minutes in the foreground", says=GUIDANCE)
+    E("deny", "wait", QA, "sleep 2m", "QA sleeps 2 minutes in the foreground")
+    E("deny", "wait", QA, "sleep infinity", "QA sleeps forever in the foreground")
+    E("deny", "wait", QA, "x=`sleep 60`", "QA sleeps a minute inside a backtick substitution")
+    E("allow", "wait", QA, "sleep 5 && curl -s localhost:3000/orders", "QA sleeps 5 seconds")
+    E("allow", "wait", QA, "sleep 30", "QA sleeps exactly 30 seconds")
+    E("allow", "wait", QA, "for f in .atdd/evidence/*.hurl; do hurl --test \"$f\"; done", "QA loops without sleep")
+    E("allow", "wait", QA, "echo \"waiting for the app\" && sleep 2", "QA echoes a loop keyword inside quotes, then sleeps briefly")
+    E("deny", "wait", QA, "bash -c \"while true; do sleep 1; done\"", "QA polls with a while/sleep loop in double-quoted bash -c")
+    E("deny", "wait", QA, "bash -c 'until curl -sf localhost:3000; do sleep 1; done'", "QA polls with an until/sleep loop in single-quoted bash -c")
+    LONG_WAITS = [{"command": "npm run build", "timeout": 600000},
+                  {"command": "until curl -sf localhost:3000/health; do sleep 2; done"},
+                  {"command": "sleep 300"}]
+    for wait in LONG_WAITS:
+        E("allow", "wait", QA, {**wait, "run_in_background": True}, f"QA runs in the background: {wait['command']}")
+        for other in ("atdd:implementer", "atdd:quality-tester", "atdd:reviewer", PREPARER, ""):
+            E("allow", "wait", other, wait, f"{other or 'main session'} waits in the foreground: {wait['command']}")
+    E("allow", "wait", QA, {"command": "sleep 300", "timeout": "not a number"}, "a guard error still allows the call")
     # other sessions are untouched
     E("allow", "git", "", "git push --force origin main", "the main session isn't policed")
+
+with tempfile.TemporaryDirectory() as tmp:
+    bare = Path(tmp)
+    sh(bare, "git", "init", "-q", "-b", "main")
+    case(bare, "allow", "wait", QA, "until false; do sleep 1; done", "QA waits in a repo without an atdd config")
 
 print(f"\n{'all passed' if not failures else f'{failures} failed'}")
 sys.exit(1 if failures else 0)
