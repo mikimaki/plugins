@@ -18,6 +18,14 @@ _Avoid_: iteration, cycle
 The most recent commit a given stage passed without blocking findings; later rounds of that stage look only at what changed since.
 _Avoid_: baseline, last green
 
+**Last tested commit**:
+The most recent commit a given stage judged, whatever its verdict; QA's later rounds explore what changed since.
+_Avoid_: last run, previous commit
+
+**Replay script**:
+An executable record of one scenario as QA performed it against the running app, which a later QA round runs again instead of re-testing that scenario by hand.
+_Avoid_: evidence (evidence also covers findings), regression test
+
 ### Code under test
 
 **Test paths**:
