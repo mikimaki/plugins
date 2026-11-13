@@ -625,17 +625,7 @@ def check_tests(g: Gate, r: Result) -> None:
         if with_coverage:
             g.coverage_reports = coverage_files(g)
     elif g.stack == "dotnet":
-        solution = g.gate_config.get("solution", "")
-        target = f"{shlex.quote(solution)} " if solution else ""
-        if with_coverage:
-            results = g.out / "test-results"
-            code = g.run("tests", f"dotnet test {target}--collect:\"XPlat Code Coverage;Format=json,cobertura\" "
-                                  f"--results-directory {shlex.quote(str(results))}")
-            g.coverage_reports = sorted(glob.glob(str(results / "**" / "coverage.cobertura.xml"), recursive=True))
-            g.coverlet_reports = sorted(glob.glob(str(results / "**" / "coverage.json"), recursive=True))
-            g.branches_measured = True
-        else:
-            code = g.run("tests", f"dotnet test {target}".strip())
+        code = run_dotnet_tests(g, r, with_coverage)
     elif g.node:
         code = run_node_tests(g, with_coverage)
     else:
@@ -689,6 +679,129 @@ def run_pytest(g: Gate, with_coverage: bool, extra: str, append: bool = False, e
     g.branches_measured = True
     return g.run("tests", f"{base} {cov} --cov-branch --cov-report=xml:{shlex.quote(str(report))} {extra}".strip(),
                  append=append, env=env)
+
+
+# A build error or an aborted test run: some tests never ran, so the failures can't all be judged flaky.
+DOTNET_TEST_BROKE = re.compile(r":\s+error\s+[A-Z]+\d+:|Test Run Aborted", re.IGNORECASE)
+
+
+def run_dotnet_tests(g: Gate, r: Result, with_coverage: bool) -> int:
+    """dotnet test, with its failures classified from the TRX reports the way run_python_tests classifies pytest's."""
+    results = g.out / "test-results"
+    code = run_dotnet_test(g, results, with_coverage)
+    if code == 0 or DOTNET_TEST_BROKE.search(g.log_path("tests").read_text(encoding="utf-8", errors="replace")):
+        return code
+    try:
+        verdicts = classify_dotnet_failures(g, results)
+    except GateError as error:
+        r.detail = f"Can't tell whether the failures are flaky: {error}"
+        return code
+    if not verdicts:
+        return code
+    if not all(verdict.flaky for verdict in verdicts.values()):
+        r.detail = "Not flaky:\n" + describe_verdicts(verdicts, flaky=False)
+        return code
+    g.flaky_tests = sorted(verdicts)
+    r.status = "flaky"
+    r.detail = (f"Every failing test is flaky: neither its test project nor a project it references changed since the "
+                f"base {g.base[:10]}. Advisory; it doesn't fail the gate:\n" + describe_verdicts(verdicts, flaky=True))
+    if not with_coverage:
+        return 0
+    shutil.rmtree(results, ignore_errors=True)
+    rerun = run_dotnet_test(g, results, with_coverage, ["--filter", dotnet_flaky_filter(g)])
+    if rerun != 0:
+        r.detail = (f"The coverage run without the flaky tests failed too (exit {rerun}), so coverage can't be "
+                    "measured.\n\n" + r.detail)
+    return rerun
+
+
+def run_dotnet_test(g: Gate, results: Path, with_coverage: bool, extra: tuple = ()) -> int:
+    solution = g.gate_config.get("solution", "")
+    command = ["dotnet", "test", *([solution] if solution else []), "--logger", "trx",
+               "--results-directory", str(results), *extra]
+    if with_coverage:
+        command.append("--collect:XPlat Code Coverage;Format=json,cobertura")
+    code = g.run("tests", command, append=bool(extra))
+    if with_coverage:
+        g.coverage_reports = sorted(glob.glob(str(results / "**" / "coverage.cobertura.xml"), recursive=True))
+        g.coverlet_reports = sorted(glob.glob(str(results / "**" / "coverage.json"), recursive=True))
+        g.branches_measured = True
+    return code
+
+
+def classify_dotnet_failures(g: Gate, results: Path) -> dict:
+    """{fully qualified test name: Verdict} for every failing test in the TRX reports; empty when a report doesn't say
+    which test project a failure ran from, so the failure stays a plain one. Reachability is judged per project: a
+    failure is flaky when no file of its test project, or of a project that one references directly or transitively,
+    changed since the base. A Reqnroll scenario's .feature file belongs to its test project, so the same rule holds."""
+    references = project_references(g)
+    folders = {posixpath.dirname(p) or ".": p for p in references}
+    changed = {}
+    for path in g.changed:
+        owner = owner_of(path, set(folders))
+        if owner in folders:
+            changed.setdefault(folders[owner], []).append(path)
+    verdicts = {}
+    for name, assembly in failing_trx_tests(results):
+        path = repo_path(g, assembly)
+        project = folders.get(owner_of(path, set(folders))) if path else None
+        if project is None:
+            return {}
+        reached = reachable_projects(project, references)
+        edited = sorted(f for p in reached for f in changed.get(p, []))
+        if edited:
+            verdicts[name] = Verdict(False, f"{project} reaches files changed on this branch: {', '.join(edited)}")
+        else:
+            others = ", ".join(sorted(reached - {project})) or "no other project"
+            verdicts[name] = Verdict(True, f"{project} and what it references ({others}) unchanged since the base")
+    return verdicts
+
+
+def failing_trx_tests(results: Path) -> list:
+    """(fully qualified name, test assembly path) for every failed result in the TRX reports under results."""
+    failing = set()
+    for report in sorted(results.glob("**/*.trx")):
+        try:
+            root = ElementTree.parse(report).getroot()
+        except (OSError, ElementTree.ParseError) as error:
+            raise GateError(f"Can't read the test report {report.name}: {error}") from None
+        methods = {}
+        for test in (e for e in root.iter() if local_name(e) == "UnitTest"):
+            method = next((m for m in test if local_name(m) == "TestMethod"), None)
+            if method is not None:
+                methods[test.get("id")] = (f"{method.get('className')}.{method.get('name')}", method.get("codeBase", ""))
+        for result in (e for e in root.iter() if local_name(e) == "UnitTestResult" and e.get("outcome") == "Failed"):
+            if result.get("testId") not in methods:
+                raise GateError(f"{report.name} names no test method for the failing {result.get('testName')}")
+            failing.add(methods[result.get("testId")])
+    return sorted(failing)
+
+
+def local_name(element) -> str:
+    return element.tag.split("}")[-1]
+
+
+def repo_path(g: Gate, path: str) -> str | None:
+    """The path relative to the repo root; None when it lies outside."""
+    try:
+        return Path(path).resolve().relative_to(g.root.resolve()).as_posix()
+    except ValueError:
+        return None
+
+
+def reachable_projects(project: str, references: dict) -> set:
+    reached, pending = set(), [project]
+    while pending:
+        current = pending.pop()
+        if current not in reached:
+            reached.add(current)
+            pending.extend(references.get(current, []))
+    return reached
+
+
+def dotnet_flaky_filter(g: Gate) -> str:
+    """A VSTest filter that leaves out the tests classified flaky."""
+    return "&".join("FullyQualifiedName!=" + re.sub(r"([\\()&|=!~])", r"\\\1", name) for name in g.flaky_tests)
 
 
 class Verdict(NamedTuple):
@@ -1466,8 +1579,9 @@ def check_mutation(g: Gate, r: Result) -> None:
         shutil.rmtree(out, ignore_errors=True)
         command = override or (
             f"dotnet stryker --solution {shlex.quote(solution)} --since:{g.base} -r json -r cleartext -r progress "
-            f"--threshold-high {high} --threshold-low {low} --break-at {limit} -O {shlex.quote(str(out))}")
-        code = g.run("mutation", command)
+            f"--threshold-high {high} --threshold-low {low} --break-at {limit} -O {shlex.quote(str(out))}"
+            + stryker_config_without_flaky_tests(g))
+        code = g.run("mutation", command, env={"ATDD_FLAKY_TEST_FILTER": dotnet_flaky_filter(g)} if g.flaky_tests else None)
         report = out / "reports" / "mutation-report.json"
     elif g.node:
         incremental = g.root / ".atdd" / "cache" / "stryker-incremental.json"
@@ -1523,6 +1637,24 @@ def check_mutation(g: Gate, r: Result) -> None:
         r.status = "fail"
         r.detail = (f"Mutation score {result['score']}% is below {limit}%. Each survivor is a behavior no test pins down:\n"
                     + "\n".join(result["survivors"][:40]))
+
+
+def stryker_config_without_flaky_tests(g: Gate) -> str:
+    """Stryker.NET takes a test filter only from its config file, so when tests were classified flaky this writes a
+    copy of the repo's stryker-config.json with a filter leaving them out and returns the option that points at it."""
+    if not g.flaky_tests:
+        return ""
+    repo_config = g.root / "stryker-config.json"
+    try:
+        config = json.loads(repo_config.read_text(encoding="utf-8")) if repo_config.is_file() else {}
+    except (OSError, json.JSONDecodeError) as error:
+        raise GateError(f"Can't read stryker-config.json ({error}), so the flaky tests can't be left out") from None
+    settings = config.setdefault("stryker-config", {})
+    existing = settings.get("test-case-filter")
+    settings["test-case-filter"] = f"({existing})&{dotnet_flaky_filter(g)}" if existing else dotnet_flaky_filter(g)
+    path = g.out / "stryker-config.json"
+    path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+    return f" -f {shlex.quote(g.rel(path))}"
 
 
 def without_flaky_tests(g: Gate) -> dict:
@@ -2253,16 +2385,24 @@ def dotnet_dependency_graphs(g: Gate, production: list):
     for dependency in run_dotnet_quality(g, "namespaces", production, "dependency-cycles").get("Dependencies", []):
         add_edge(namespaces, dependency["From"], dependency["To"], dependency["File"],
                  f"{dependency['File']}:{dependency['Line']} uses {dependency['Symbol']}")
+    for project, targets in project_references(g).items():
+        for target in targets:
+            add_edge(projects, project, target, project, f"{project} references {target}")
+    return namespaces, projects
+
+
+def project_references(g: Gate) -> dict:
+    """{project file: [the project files its ProjectReference items name]} for every project file in the repo."""
+    references = {}
     for project in tracked(g, "*.csproj", "*.fsproj", "*.vbproj"):
         try:
             root = ElementTree.parse(g.root / project).getroot()
         except (OSError, ElementTree.ParseError) as error:
             raise GateError(f"Can't read {project}: {error}") from None
-        for element in root.iter():
-            if element.tag.split("}")[-1] == "ProjectReference" and element.get("Include"):
-                target = posixpath.normpath(posixpath.join(posixpath.dirname(project), element.get("Include").replace("\\", "/")))
-                add_edge(projects, project, target, project, f"{project} references {target}")
-    return namespaces, projects
+        references[project] = [
+            posixpath.normpath(posixpath.join(posixpath.dirname(project), element.get("Include").replace("\\", "/")))
+            for element in root.iter() if local_name(element) == "ProjectReference" and element.get("Include")]
+    return references
 
 
 # ---------- cover mode ----------
