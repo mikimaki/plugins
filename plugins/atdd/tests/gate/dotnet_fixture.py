@@ -9,13 +9,11 @@ The NuGet packages must already be in the local cache, or reachable.
     add_to_feature(repo, path, text)      # a file committed on the feature branch
 """
 import json
-import os
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 
-from fixture import add_to_base, add_to_feature, commit, git, write  # noqa: F401  (re-exported for the tests)
+from fixture import add_to_base, add_to_feature, commit, git, run_gate, write  # noqa: F401  (re-exported for the tests)
 
 GATE = Path(__file__).resolve().parents[2] / "skills" / "quality-gate" / "scripts" / "gate.py"
 
@@ -257,13 +255,3 @@ def build(target: Path, with_stryker: bool = False) -> Path:
     write(target, "tests/Steps.Goals.Tests/ClearGoalTests.cs", CLEAR_GOAL_TESTS)
     commit(target, "Members can clear their goal")
     return target
-
-
-def run_gate(repo: Path, mode: str, *args: str) -> dict:
-    """Runs gate.py the way a hook or agent does and returns its report.json."""
-    completed = subprocess.run([sys.executable, "scripts/atdd/gate.py", mode, *args], cwd=repo, capture_output=True,
-                               text=True, env={k: v for k, v in os.environ.items() if k not in ("ATDD_BASE", "ATDD_OUT")})
-    report = repo / ".atdd" / "quality" / "latest" / "report.json"
-    if not report.exists():
-        raise AssertionError(f"gate.py wrote no report:\n{completed.stdout}\n{completed.stderr}")
-    return json.loads(report.read_text(encoding="utf-8"))

@@ -10,6 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import dotnet_fixture as fixture  # noqa: E402
+from fixture import check, failures  # noqa: E402
 
 FAILING_PUSH_TEST = """using Steps.Push;
 using Xunit;
@@ -54,14 +55,6 @@ FAILING_PUSH_FEATURE = """Feature: Slow push
 """
 
 FLAKY_PUSH_SCENARIO = "Steps.Acceptance.Features.SlowPushFeature.TheGatewayAnswersInTime"
-
-
-def failures(report: dict) -> str:
-    return "\n".join(f"{c['name']}: {c['detail']}" for c in report["checks"] if c["status"] == "fail")
-
-
-def check(report: dict, name: str) -> dict:
-    return next(c for c in report["checks"] if c["name"] == name)
 
 
 class DotnetGateTest(unittest.TestCase):

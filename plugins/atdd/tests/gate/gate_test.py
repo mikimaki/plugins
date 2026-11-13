@@ -10,6 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fixture  # noqa: E402
+from fixture import check, failures  # noqa: E402
 
 FAST_STRUCTURAL_CHECKS = ["duplication", "architecture", "dead-code", "locked-files"]
 FULL_ONLY = ["diff-coverage", "mutation", "vulnerabilities"]
@@ -96,14 +97,6 @@ def test_app_answers_in_time():
 
 def names(report: dict) -> list:
     return [check["name"] for check in report["checks"]]
-
-
-def failures(report: dict) -> str:
-    return "\n".join(f"{c['name']}: {c['detail']}" for c in report["checks"] if c["status"] == "fail")
-
-
-def check(report: dict, name: str) -> dict:
-    return next(c for c in report["checks"] if c["name"] == name)
 
 
 class GateTest(unittest.TestCase):

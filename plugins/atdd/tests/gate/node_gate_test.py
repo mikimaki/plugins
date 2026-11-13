@@ -11,6 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import node_fixture as fixture  # noqa: E402
+from fixture import check, failures  # noqa: E402
 
 FAILING_PUSH_TEST = """import { expect, it } from 'vitest'
 import { PUSH_URL } from '../src/push.ts'
@@ -81,14 +82,6 @@ Then('the gateway answers in time', async () => {
   expect(url).toBe('the gateway answered in time')
 })
 """
-
-
-def check(report: dict, name: str) -> dict:
-    return next(c for c in report["checks"] if c["name"] == name)
-
-
-def failures(report: dict) -> str:
-    return "\n".join(f"{c['name']}: {c['detail']}" for c in report["checks"] if c["status"] == "fail")
 
 
 class TypeScriptGateTest(unittest.TestCase):

@@ -143,11 +143,23 @@ def configure_gate(repo: Path, **settings) -> None:
     path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
 
 
-def run_gate(repo: Path, mode: str, *args: str) -> dict:
-    """Runs gate.py the way a hook or agent does and returns its report.json. The tools come from the PATH; the app's
-    package is put on PYTHONPATH as an editable install would."""
-    env = {**os.environ, "PYTHONPATH": str(repo / "src")}
-    env.pop("ATDD_BASE", None)
-    env.pop("ATDD_OUT", None)
-    subprocess.run([sys.executable, "scripts/atdd/gate.py", mode, *args], cwd=repo, env=env, capture_output=True, text=True)
-    return json.loads((repo / ".atdd" / "quality" / "latest" / "report.json").read_text(encoding="utf-8"))
+def run_gate(repo: Path, mode: str, *args: str, env: dict | None = None) -> dict:
+    """Runs the repo's gate.py the way a hook or agent does, with env added to the environment, and returns its
+    report.json. Shared by every stack's tests. The tools come from the PATH; for the Python app, its package is put
+    on PYTHONPATH as an editable install would."""
+    environment = {k: v for k, v in os.environ.items() if k not in ("ATDD_BASE", "ATDD_OUT")}
+    environment.update({"PYTHONPATH": str(repo / "src"), **(env or {})})
+    completed = subprocess.run([sys.executable, "scripts/atdd/gate.py", mode, *args], cwd=repo, env=environment,
+                               capture_output=True, text=True)
+    report = repo / ".atdd" / "quality" / "latest" / "report.json"
+    if not report.exists():
+        raise AssertionError(f"gate.py wrote no report:\n{completed.stdout}\n{completed.stderr}")
+    return json.loads(report.read_text(encoding="utf-8"))
+
+
+def check(report: dict, name: str) -> dict:
+    return next(c for c in report["checks"] if c["name"] == name)
+
+
+def failures(report: dict) -> str:
+    return "\n".join(f"{c['name']}: {c['detail']}" for c in report["checks"] if c["status"] == "fail")
