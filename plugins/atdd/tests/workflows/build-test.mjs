@@ -45,15 +45,19 @@ const qaPrompts = calls => calls.filter(c => c.opts.agentType === 'atdd:qa').map
   assert.match(first, /\.atdd\/PROJ-45\/qa\/scenarios\//)
   console.log('first QA prompt ok')
 }
-// after a QA failure, the next QA run names the failed commit and the diff to the new commit
+// after a QA failure, QA runs again: it names the failed commit, the diff to the new commit and the playbook's later-rounds method
 {
   const { result, calls } = await run(B, { args: 'PROJ-45', agent: make({ 'atdd:preparer': [prep], 'atdd:implementer': [impl('c1'), impl('c2')], 'atdd:reviewer': [pass, pass], 'atdd:quality-tester': [pass, pass], 'atdd:qa': [fail('login'), pass] }) })
   assert.equal(result.status, 'done')
-  const [, second] = qaPrompts(calls)
+  const prompts = qaPrompts(calls)
+  assert.equal(prompts.length, 2)
+  const [, second] = prompts
   assert.match(second, /You last tested c1\b/)
+  assert.match(second, /"Later rounds"/)
   assert.match(second, /git diff c1\.\.c2/)
   assert.match(second, /\.atdd\/PROJ-45\/qa\/scenarios\//)
   assert.match(second, /qa-login/)
+  for (const c of calls.filter(c => c.opts.agentType === 'atdd:quality-tester')) assert.doesNotMatch(c.prompt, /productionChanged|production-untouched/)
   console.log('QA re-run after QA failure ok')
 }
 // QA fails, then review and quality fail in later rounds: QA still names the commit it last tested
@@ -73,11 +77,4 @@ const qaPrompts = calls => calls.filter(c => c.opts.agentType === 'atdd:qa').map
   assert.match(prompts[1], /git diff c1\.\.c4/)
   assert.doesNotMatch(prompts[1], /\bc[23]\b/)
   console.log('QA last tested survives review and quality failures ok')
-}
-// QA is never skipped, and the quality stage is not asked about production changes
-{
-  const { calls } = await run(B, { args: 'PROJ-45', agent: make({ 'atdd:preparer': [prep], 'atdd:implementer': [impl('c1'), impl('c2')], 'atdd:reviewer': [pass, pass], 'atdd:quality-tester': [pass, pass], 'atdd:qa': [fail('login'), pass] }) })
-  assert.equal(qaPrompts(calls).length, 2)
-  for (const c of calls.filter(c => c.opts.agentType === 'atdd:quality-tester')) assert.doesNotMatch(c.prompt, /productionChanged|production-untouched/)
-  console.log('QA never skipped ok')
 }

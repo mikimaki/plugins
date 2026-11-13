@@ -141,9 +141,10 @@ function stagePrompt(stage, prep, round, sha, memory) {
     lines.push(`You approved ${memory.lastApproved} in an earlier round. Focus on git diff ${memory.lastApproved}..${sha} and whatever it affects; don't re-open code you already approved unless the new change breaks it.`)
   }
   if (stage.key === 'qa') {
-    lines.push(`Evidence directory for findings: .atdd/${prep.key}/qa/round-${round}/\nReplay scripts, one per scenario, overwritten each round: .atdd/${prep.key}/qa/scenarios/`)
+    lines.push(`Evidence directory for findings: .atdd/${prep.key}/qa/round-${round}/`)
+    lines.push(`Replay scripts folder: .atdd/${prep.key}/qa/scenarios/`)
     if (memory.lastTested) {
-      lines.push(`You last tested ${memory.lastTested}. This is a later round: re-test your earlier findings by hand, replay every saved script in .atdd/${prep.key}/qa/scenarios/ with one command (hand-test only scenarios without a script), then explore only around git diff ${memory.lastTested}..${sha}.`)
+      lines.push(`You last tested ${memory.lastTested}; the change since is git diff ${memory.lastTested}..${sha}. Work as your playbook's "Later rounds" describes.`)
     }
   }
   if (stage.key === 'quality') {
@@ -166,7 +167,7 @@ const stages = STAGES.filter(s => s.key !== 'qa' || prep.hasQa)
 if (!prep.hasQa) log('No commands.qaUp in .claude/atdd.json, so the QA stage is skipped. Run /atdd:init to set it up.')
 
 const maxRounds = Math.max(1, prep.maxRounds || 5)
-const memory = Object.fromEntries(stages.map(s => [s.key, { findings: [], responses: [], lastApproved: null, lastTested: null }]))
+const memory = Object.fromEntries(stages.map(s => [s.key, { findings: [], responses: [], lastApproved: null }]))
 const history = []
 const advisory = {}
 let failed = null
