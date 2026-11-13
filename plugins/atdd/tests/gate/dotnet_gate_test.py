@@ -80,6 +80,17 @@ class DotnetGateTest(unittest.TestCase):
         self.assertIn(FLAKY_PUSH_TEST, tests["detail"])
         self.assertTrue(report["passed"], failures(report))
 
+    def test_full_gate_measures_coverage_and_mutation_without_the_flaky_test_and_names_it(self):
+        self.repo = fixture.build(Path(self.tmp.name) / "repo", with_stryker=True)
+        fixture.add_to_base(self.repo, "tests/Steps.Push.Tests/SlowGatewayTests.cs", FAILING_PUSH_TEST)
+        report = fixture.run_gate(self.repo, "full", "--only", "tests,diff-coverage,mutation")
+        self.assertEqual("flaky", check(report, "tests")["status"], check(report, "tests")["detail"])
+        for name in ("diff-coverage", "mutation"):
+            self.assertEqual("pass", check(report, name)["status"], check(report, name)["detail"])
+            self.assertIn(FLAKY_PUSH_TEST, check(report, name)["detail"])
+        self.assertTrue(report["passed"], failures(report))
+        self.assertNotIn("tests are failing", (self.repo / check(report, "mutation")["log"]).read_text(encoding="utf-8"))
+
     def test_failing_test_whose_project_references_a_changed_project_transitively_fails(self):
         fixture.add_to_base(self.repo, "tests/Steps.Reports.Tests/SlowReportTests.cs", FAILING_REPORT_TEST)
         self.assert_tests_fail(fixture.run_gate(self.repo, "fast", "--only", "tests"), "src/Steps.Goals/GoalBook.cs")
@@ -103,10 +114,18 @@ class DotnetGateTest(unittest.TestCase):
         self.assert_tests_fail(fixture.run_gate(self.repo, "fast", "--only", "tests"),
                                "tests/Steps.Acceptance/Features/SlowPush.feature")
 
+    def test_build_error_fails_even_when_every_failing_test_is_flaky(self):
+        fixture.add_to_base(self.repo, "tests/Steps.Push.Tests/SlowGatewayTests.cs", FAILING_PUSH_TEST)
+        fixture.add_to_feature(self.repo, "src/Steps.Goals/Broken.cs", "namespace Steps.Goals;\n\npublic class Broken {\n")
+        tests = check(fixture.run_gate(self.repo, "fast", "--only", "tests"), "tests")
+        self.assertEqual("fail", tests["status"], tests["detail"])
+        self.assertIn("src/Steps.Goals/Broken.cs", tests["detail"])
+
     def assert_tests_fail(self, report: dict, why: str):
         tests = check(report, "tests")
         self.assertEqual("fail", tests["status"], tests["detail"])
-        self.assertIn(why, tests["detail"])
+        self.assertIn("Not flaky:", tests["detail"])
+        self.assertIn(why, tests["detail"].split("Not flaky:")[-1])
         self.assertFalse(report["passed"])
 
 

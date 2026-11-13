@@ -30,6 +30,7 @@ LIBRARY = """<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
 {references}</Project>
 """
@@ -38,6 +39,7 @@ TEST_PROJECT = """<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
     <IsPackable>false</IsPackable>
   </PropertyGroup>
   <ItemGroup>
@@ -69,7 +71,10 @@ public class GoalBook
 """
 
 CLEAR_GOAL = """
-    public void ClearGoal(string member) => _goals.Remove(member);
+    public void ClearGoal(string member)
+    {
+        _goals.Remove(member);
+    }
 }
 """
 

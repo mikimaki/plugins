@@ -681,11 +681,15 @@ def run_pytest(g: Gate, with_coverage: bool, extra: str, append: bool = False, e
                  append=append, env=env)
 
 
+# A build error or an aborted test run: some tests never ran, so the failures can't all be judged flaky.
+DOTNET_TEST_BROKE = re.compile(r":\s+error\s+[A-Z]+\d+:|Test Run Aborted", re.IGNORECASE)
+
+
 def run_dotnet_tests(g: Gate, r: Result, with_coverage: bool) -> int:
     """dotnet test, with its failures classified from the TRX reports the way run_python_tests classifies pytest's."""
     results = g.out / "test-results"
     code = run_dotnet_test(g, results, with_coverage)
-    if code == 0:
+    if code == 0 or DOTNET_TEST_BROKE.search(g.log_path("tests").read_text(encoding="utf-8", errors="replace")):
         return code
     try:
         verdicts = classify_dotnet_failures(g, results)
@@ -1575,8 +1579,9 @@ def check_mutation(g: Gate, r: Result) -> None:
         shutil.rmtree(out, ignore_errors=True)
         command = override or (
             f"dotnet stryker --solution {shlex.quote(solution)} --since:{g.base} -r json -r cleartext -r progress "
-            f"--threshold-high {high} --threshold-low {low} --break-at {limit} -O {shlex.quote(str(out))}")
-        code = g.run("mutation", command)
+            f"--threshold-high {high} --threshold-low {low} --break-at {limit} -O {shlex.quote(str(out))}"
+            + stryker_config_without_flaky_tests(g))
+        code = g.run("mutation", command, env={"ATDD_FLAKY_TEST_FILTER": dotnet_flaky_filter(g)} if g.flaky_tests else None)
         report = out / "reports" / "mutation-report.json"
     elif g.node:
         incremental = g.root / ".atdd" / "cache" / "stryker-incremental.json"
@@ -1632,6 +1637,24 @@ def check_mutation(g: Gate, r: Result) -> None:
         r.status = "fail"
         r.detail = (f"Mutation score {result['score']}% is below {limit}%. Each survivor is a behavior no test pins down:\n"
                     + "\n".join(result["survivors"][:40]))
+
+
+def stryker_config_without_flaky_tests(g: Gate) -> str:
+    """Stryker.NET takes a test filter only from its config file, so when tests were classified flaky this writes a
+    copy of the repo's stryker-config.json with a filter leaving them out and returns the option that points at it."""
+    if not g.flaky_tests:
+        return ""
+    repo_config = g.root / "stryker-config.json"
+    try:
+        config = json.loads(repo_config.read_text(encoding="utf-8")) if repo_config.is_file() else {}
+    except (OSError, json.JSONDecodeError) as error:
+        raise GateError(f"Can't read stryker-config.json ({error}), so the flaky tests can't be left out") from None
+    settings = config.setdefault("stryker-config", {})
+    existing = settings.get("test-case-filter")
+    settings["test-case-filter"] = f"({existing})&{dotnet_flaky_filter(g)}" if existing else dotnet_flaky_filter(g)
+    path = g.out / "stryker-config.json"
+    path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+    return f" -f {shlex.quote(g.rel(path))}"
 
 
 def without_flaky_tests(g: Gate) -> dict:
