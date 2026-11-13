@@ -33,13 +33,20 @@ For each scenario in the feature directory:
 1. **Arrange the Given state the way a user or client would:** through the app's APIs or UI, or with the seeding approach in `qa.notes`. Don't use the test suite's helpers. Bypassing them is the point.
 2. **Perform the When**, and observe the Then with your own requests or eyes.
 3. **Record the result** in `<evidence-dir>/scenarios.md`: one line per scenario with pass or fail and a pointer to the evidence.
+4. **Save its replay script** in `.atdd/<key>/qa/scenarios/`, whether it passed or failed, overwriting last round's.
 
-**For APIs, write each scenario as a Hurl file.** The file is executable, reproducible evidence. If `hurl` isn't installed, use a small curl script with `set -e` and explicit checks instead.
+**Replay scripts.** Every QA run leaves exactly one replay script per scenario in `.atdd/<key>/qa/scenarios/`, so a later round can replay all of them with one command:
+
+- a `.hurl` file for API scenarios (a curl script with `set -e` and explicit checks if `hurl` isn't installed);
+- a Playwright script for UI scenarios when Playwright is available, otherwise a step list (`<scenario>.steps.md`) that a later round follows by hand;
+- each one self-contained: it sets up its own Given state through the app's real interfaces, never relying on what an earlier script or round left behind. Generate unique values (a timestamp or random suffix) where the app forbids duplicates.
+
+Evidence for findings stays in `round-<n>/`; the scenarios folder holds only replay scripts.
 
 The example replays a generic "an empty display name is refused" scenario. Your files follow your scenarios and your API.
 
 ```hurl
-# .atdd/proj-45/qa/round-1/empty-display-name-refused.hurl
+# .atdd/proj-45/qa/scenarios/empty-display-name-refused.hurl
 POST {{base}}/users
 Content-Type: application/json
 { "displayName": "Robin" }
@@ -61,7 +68,7 @@ jsonpath "$.displayName" == "Robin"
 ```
 
 ```bash
-hurl --test --variable base=<qa.baseUrl> .atdd/proj-45/qa/round-1/*.hurl
+hurl --test --variable base=<qa.baseUrl> .atdd/proj-45/qa/scenarios/*.hurl
 ```
 
 **For UI** (when `qa.ui` is true), use the Playwright MCP browser tools when they're available. Find them with ToolSearch under the `playwright` prefix.
@@ -71,7 +78,7 @@ hurl --test --variable base=<qa.baseUrl> .atdd/proj-45/qa/round-1/*.hurl
 - Click and type like a user.
 - Take a screenshot for every failure and every scenario's end state.
 
-Without the MCP tools, a short Playwright script via `npx playwright` works too. Save it as evidence.
+Without the MCP tools, a short Playwright script via `npx playwright` works too. Either way, save the scenario's replay script in the scenarios folder.
 
 **Time-dependent scenarios:** use the app's test clock if `qa.notes` names one. Otherwise test what you can with data timestamps, and mark the scenario `not manually verifiable: needs a controllable clock` (a minor finding).
 
@@ -150,6 +157,13 @@ evidence: .atdd/proj-45/qa/round-1/qa-3.hurl, qa-3.response.json, app.log lines 
 - **Major:** spec-defined behavior is wrong outside the scenarios' exact examples; a swallowed or meaningless error; a reachable unhandled exception.
 - **Minor:** cosmetic issues, wording, pre-existing issues.
 
-**In re-test rounds:**
-1. Rerun the evidence for each earlier finding first.
-2. Then replay all scenarios. Fixes often break neighbors.
+## 5. Later rounds
+
+When the prompt names the commit you last tested, sections 2 and 3 shrink to three steps:
+
+1. **Re-test every earlier finding by hand** first, rerunning its evidence.
+2. **Replay all saved scripts with one command** (`hurl --test --variable base=<qa.baseUrl> .atdd/<key>/qa/scenarios/*.hurl`, plus the Playwright scripts). Fixes often break neighbors. Hand-test only scenarios that have no script, and follow the step lists by hand. Save fresh replay scripts as in section 2.
+3. **Explore only around** `git diff <last tested>..<commit under test>` and what it affects, with section 3's heuristics.
+
+- A replay failure of a scenario that passed before is a **blocker**. Attach the replay output as evidence.
+- A script that can't run again because of leftover state (a duplicate unique value, a record from last round) is not a finding. Fix the script so it sets up its own state, and hand-test that scenario this round.

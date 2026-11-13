@@ -35,3 +35,49 @@ const stagesOf = calls => calls.map(c => c.opts.agentType).filter(t => !['atdd:p
   assert.equal(calls.filter(c => c.opts.agentType === 'atdd:qa').length, 0)
   console.log('null result ok')
 }
+const qaPrompts = calls => calls.filter(c => c.opts.agentType === 'atdd:qa').map(c => c.prompt)
+// the first QA run names no last tested commit, only the replay-script folder
+{
+  const { calls } = await run(B, { args: 'PROJ-45', agent: make({ 'atdd:preparer': [prep], 'atdd:implementer': [impl('c1')], 'atdd:reviewer': [pass], 'atdd:quality-tester': [pass], 'atdd:qa': [pass] }) })
+  const [first] = qaPrompts(calls)
+  assert.doesNotMatch(first, /last tested/i)
+  assert.doesNotMatch(first, /git diff c1\.\./)
+  assert.match(first, /\.atdd\/PROJ-45\/qa\/scenarios\//)
+  console.log('first QA prompt ok')
+}
+// after a QA failure, the next QA run names the failed commit and the diff to the new commit
+{
+  const { result, calls } = await run(B, { args: 'PROJ-45', agent: make({ 'atdd:preparer': [prep], 'atdd:implementer': [impl('c1'), impl('c2')], 'atdd:reviewer': [pass, pass], 'atdd:quality-tester': [pass, pass], 'atdd:qa': [fail('login'), pass] }) })
+  assert.equal(result.status, 'done')
+  const [, second] = qaPrompts(calls)
+  assert.match(second, /You last tested c1\b/)
+  assert.match(second, /git diff c1\.\.c2/)
+  assert.match(second, /\.atdd\/PROJ-45\/qa\/scenarios\//)
+  assert.match(second, /qa-login/)
+  console.log('QA re-run after QA failure ok')
+}
+// QA fails, then review and quality fail in later rounds: QA still names the commit it last tested
+{
+  const { result, calls } = await run(B, { args: 'PROJ-45', agent: make({
+    'atdd:preparer': [{ ...prep, maxRounds: 4 }],
+    'atdd:implementer': [impl('c1'), impl('c2'), impl('c3'), impl('c4')],
+    'atdd:reviewer': [pass, fail('naming'), pass, pass],
+    'atdd:quality-tester': [pass, fail('dup'), pass],
+    'atdd:qa': [fail('login'), pass],
+  }) })
+  assert.equal(result.status, 'done')
+  assert.equal(result.sha, 'c4')
+  const prompts = qaPrompts(calls)
+  assert.equal(prompts.length, 2)
+  assert.match(prompts[1], /You last tested c1\b/)
+  assert.match(prompts[1], /git diff c1\.\.c4/)
+  assert.doesNotMatch(prompts[1], /\bc[23]\b/)
+  console.log('QA last tested survives review and quality failures ok')
+}
+// QA is never skipped, and the quality stage is not asked about production changes
+{
+  const { calls } = await run(B, { args: 'PROJ-45', agent: make({ 'atdd:preparer': [prep], 'atdd:implementer': [impl('c1'), impl('c2')], 'atdd:reviewer': [pass, pass], 'atdd:quality-tester': [pass, pass], 'atdd:qa': [fail('login'), pass] }) })
+  assert.equal(qaPrompts(calls).length, 2)
+  for (const c of calls.filter(c => c.opts.agentType === 'atdd:quality-tester')) assert.doesNotMatch(c.prompt, /productionChanged|production-untouched/)
+  console.log('QA never skipped ok')
+}
