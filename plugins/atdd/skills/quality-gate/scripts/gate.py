@@ -1998,15 +1998,14 @@ def cucumber_failures(run: NodeTestRun, text: str) -> list:
 
 
 def playwright_failures(g: Gate, run: NodeTestRun, report: dict) -> list:
-    """From Playwright's JSON report. A test playwright-bdd generated runs its .feature file and every code file under
-    featuresDir (step definitions, fixtures): playwright-bdd doesn't report which of them a scenario ran."""
+    """From Playwright's JSON report."""
     root = Path(report["config"]["rootDir"])
     failures = []
 
     def walk(suite: dict, titles: list) -> None:
         for spec in suite.get("specs", []):
             if not spec["ok"]:
-                failures.append(playwright_failure(g, run, root / spec["file"], " ".join([*titles, spec["title"]])))
+                failures.append(playwright_failure(g, run, root / spec["file"], spec, titles))
         for child in suite.get("suites", []):
             walk(child, [*titles, child["title"]])
 
@@ -2015,15 +2014,70 @@ def playwright_failures(g: Gate, run: NodeTestRun, report: dict) -> list:
     return failures
 
 
-def playwright_failure(g: Gate, run: NodeTestRun, spec: Path, name: str) -> NodeFailure:
-    generated = re.match(r"//\s*Generated from:\s*(\S+)", spec.read_text(encoding="utf-8"))
+def playwright_failure(g: Gate, run: NodeTestRun, spec_file: Path, spec: dict, titles: list) -> NodeFailure:
+    """A test playwright-bdd generated runs its .feature file, the modules the generated file imports (the fixtures)
+    and the files holding the step definitions its steps match; any other test runs its spec file."""
+    name = " ".join([*titles, spec["title"]])
+    text = spec_file.read_text(encoding="utf-8")
+    generated = re.match(r"//\s*Generated from:\s*(\S+)", text)
     if not generated:
-        path = repo_path(g, str(spec))
+        path = repo_path(g, str(spec_file))
         return NodeFailure(run, f"{path}::{name}", name, path, (path,), ())
     feature = generated.group(1)
-    features_dir = str(g.config.get("featuresDir", "features")).strip("/")
-    code = tuple(p for p in tracked(g, features_dir) if p.endswith(g.profile["extensions"]) and (g.root / p).is_file())
-    return NodeFailure(run, f"{feature}::{name}", name, feature, code, (feature,))
+    imports = [repo_path(g, str(spec_file.parent / target)) for target in re.findall(r"""^import .* from ["'](\.[^"']+)["']""", text, re.MULTILINE)]
+    data = re.search(r"// bdd-data-start(.*?)\]\s*;?\s*// bdd-data-end", text, re.DOTALL)
+    tests = json.loads("[" + data.group(1).strip().rstrip(",") + "]") if data else []
+    steps = [step["textWithKeyword"].partition(" ")[2] for test in tests if test.get("pwTestLine") == spec.get("line")
+             for step in test.get("steps", [])]
+    code = {f for f in imports if f} | step_definition_files(g, steps)
+    return NodeFailure(run, f"{feature}::{spec['title']}", name, feature, tuple(sorted(code)), (feature,))
+
+
+def step_definition_files(g: Gate, steps: list) -> set:
+    """The files holding a step definition that matches one of these step texts: every step definition file when one
+    of them matches none, so a step the gate can't place leaves nothing out."""
+    definitions = step_definitions(g)
+    files = set()
+    for step in steps:
+        matching = {d.location.rpartition(":")[0] for d in definitions if node_step_matches(d, step)}
+        if not matching:
+            return {d.location.rpartition(":")[0] for d in definitions}
+        files |= matching
+    return files
+
+
+def node_step_matches(definition: StepDefinition, step: str) -> bool:
+    pattern = definition.text if definition.kind == "regex" else cucumber_expression_regex(definition.text)
+    try:
+        return re.search(pattern, step) is not None
+    except re.error:
+        return True
+
+
+CUCUMBER_PARAMETERS = {
+    "int": r"-?\d+", "float": r"[-+]?(?:\d*\.)?\d+(?:[eE][-+]?\d+)?", "word": r"[^\s]+",
+    "string": r"""(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')""", "": r".*",
+}
+
+
+def cucumber_expression_regex(expression: str) -> str:
+    """A regex for a Cucumber expression: {parameters}, (optional text) and word/alternatives."""
+    words = []
+    for word in expression.split(" "):
+        alternatives = re.split(r"(?<!\\)/", word) if "{" not in word else [word]
+        pieces = []
+        for alternative in alternatives:
+            piece = ""
+            for match in re.finditer(r"\\(.)|\{([^}]*)\}|\(([^)]*)\)|(.)", alternative):
+                if match.group(0).startswith("{"):
+                    piece += CUCUMBER_PARAMETERS.get(match.group(2), ".*")
+                elif match.group(0).startswith("("):
+                    piece += f"(?:{re.escape(match.group(3))})?"
+                else:
+                    piece += re.escape(match.group(1) or match.group(4))
+            pieces.append(piece)
+        words.append(pieces[0] if len(pieces) == 1 else f"(?:{'|'.join(pieces)})")
+    return "^" + " ".join(words) + "$"
 
 
 def repo_path(g: Gate, path: str) -> str | None:

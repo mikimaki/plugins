@@ -67,6 +67,21 @@ Then('the gateway answers in time', () => {
 })
 """
 
+BDD_PUSH_STEPS = """import { expect } from '@playwright/test'
+import { PUSH_URL } from '../../src/push.ts'
+import { Given, Then } from '../support/fixtures.ts'
+
+let url = ''
+
+Given('the push gateway', async () => {
+  url = PUSH_URL
+})
+
+Then('the gateway answers in time', async () => {
+  expect(url).toBe('the gateway answered in time')
+})
+"""
+
 
 def check(report: dict, name: str) -> dict:
     return next(c for c in report["checks"] if c["name"] == name)
@@ -136,6 +151,11 @@ class TypeScriptGateTest(unittest.TestCase):
             "import { PUSH_URL }", "import { GoalBook } from '../../src/goals.ts'\nimport { PUSH_URL }"))
         self.assert_tests_fail(fixture.run_gate(self.repo, "fast"), "imports reach changed production code: src/goals.ts")
 
+    def test_failing_scenario_whose_step_definitions_changed_on_the_branch_fails(self):
+        self.add_failing_push_scenario()
+        fixture.add_to_feature(self.repo, "features/steps/push.steps.ts", self.push_steps() + "\nexport const TIMEOUT = 5\n")
+        self.assert_tests_fail(fixture.run_gate(self.repo, "fast"), "features/steps/push.steps.ts added or changed")
+
     def add_failing_push_scenario(self, steps: str | None = None):
         fixture.add_to_base(self.repo, "features/push/push.feature", PUSH_FEATURE)
         fixture.add_to_base(self.repo, "features/steps/push.steps.ts", steps or self.push_steps())
@@ -159,6 +179,14 @@ class TypeScriptGateTest(unittest.TestCase):
         self.assertEqual("fail", tests["status"], tests["detail"])
         self.assertIn(why, tests["detail"])
         self.assertFalse(report["passed"])
+
+
+class NextJsGateTest(TypeScriptGateTest):
+    """The same cases with the Next.js stack, whose scenarios run in playwright-bdd."""
+    stack = "nextjs"
+
+    def push_steps(self) -> str:
+        return BDD_PUSH_STEPS
 
 
 if __name__ == "__main__":

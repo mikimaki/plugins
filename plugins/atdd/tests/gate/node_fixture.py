@@ -78,12 +78,7 @@ const testDir = defineBddConfig({
 export default defineConfig({ testDir, retries: 0, reporter: [['list']] })
 """
 
-BDD_FIXTURES = """import { createBdd, test as base } from 'playwright-bdd'
-import { GoalBook } from '../../src/goals.ts'
-
-export const test = base.extend<{ book: GoalBook }>({
-  book: async ({}, provide) => provide(new GoalBook()),
-})
+BDD_FIXTURES = """import { createBdd, test } from 'playwright-bdd'
 
 export const { Given, When, Then } = createBdd(test)
 """
@@ -168,15 +163,20 @@ Then('Robin\\'s goal is {int} steps', (steps: number) => {
 """
 
 BDD_STEPS = """import { expect } from '@playwright/test'
+import { GoalBook } from '../../src/goals.ts'
 import { Given, Then, When } from '../support/fixtures.ts'
 
-Given('Robin has no goal', async () => {})
+let book = new GoalBook()
 
-When('Robin sets a goal of {string} steps', async ({ book }, text: string) => {
+Given('Robin has no goal', async () => {
+  book = new GoalBook()
+})
+
+When('Robin sets a goal of {string} steps', async ({}, text: string) => {
   book.setGoal('robin', text)
 })
 
-Then('Robin\\'s goal is {int} steps', async ({ book }, steps: number) => {
+Then('Robin\\'s goal is {int} steps', async ({}, steps: number) => {
   expect(book.goalOf('robin')).toBe(steps)
 })
 """
