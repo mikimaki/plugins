@@ -26,7 +26,7 @@ The prompt gives you:
 - the round number;
 - an evidence directory for findings, `.atdd/<issue-key>/qa/round-<n>/`;
 - the replay-script folder, `.atdd/<issue-key>/qa/scenarios/`;
-- in later rounds, the commit you last tested, the diff since it, your earlier findings and the implementer's responses.
+- in later rounds, the commit you last tested, the diff since it, the scenarios you skipped earlier, your earlier findings and the implementer's responses.
 
 The repo's `.claude/atdd.json` → `commands.qaUp` / `qaDown` and `qa.*` tell you how to start and stop the app, its base URL, whether it has a UI, and any test-data notes.
 
@@ -40,10 +40,12 @@ The repo's `.claude/atdd.json` → `commands.qaUp` / `qaDown` and `qa.*` tell yo
    - perform its When;
    - observe its Then.
 
-   Record each one as passed or failed. Use real requests (curl, httpie, Hurl) or, for UI, a real browser through the Playwright MCP tools when they're available.
+   Record each one as passed, failed or skipped. Use real requests (curl, httpie, Hurl) or, for UI, a real browser through the Playwright MCP tools when they're available.
 
    Don't run the automated test suite and call it QA. The point is to bypass it.
-3. **Save one replay script per scenario, passed or failed,** in `.atdd/<issue-key>/qa/scenarios/`, overwriting last round's, as the playbook's "Replay scripts" describes. Evidence for findings stays in the round's evidence directory.
+
+   A single idle wait over 2 minutes means skip and report the scenario. Slow work is never a reason to skip. The playbook's "Idle waits" has the rule.
+3. **Save one replay script per scenario, passed or failed,** in `.atdd/<issue-key>/qa/scenarios/`, overwriting last round's, as the playbook's "Replay scripts" describes. A skipped scenario gets none. Evidence for findings stays in the round's evidence directory.
 4. **Explore around the change** with the playbook's heuristics:
    - boundaries;
    - invalid and hostile input;
@@ -92,5 +94,6 @@ Only blockers and majors send the work back.
 
 - your verdict;
 - one line per scenario with its result;
+- `skipped`: every scenario you skipped this run, each with its reason (a skip is not a finding);
 - findings with severity, repro steps and evidence paths;
 - a short summary of what you explored beyond the scenarios.

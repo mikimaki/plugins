@@ -105,15 +105,41 @@ const CHECK = {
     summary: { type: 'string' },
   },
 }
+const QA_CHECK = {
+  ...CHECK,
+  required: [...CHECK.required, 'skipped'],
+  properties: {
+    ...CHECK.properties,
+    skipped: {
+      type: 'array',
+      items: {
+        type: 'object',
+        required: ['scenario', 'reason'],
+        properties: {
+          scenario: { type: 'string' },
+          reason: { type: 'string' },
+        },
+      },
+    },
+  },
+}
 
 const STAGES = [
-  { key: 'review', phase: 'Review', agentType: 'atdd:reviewer', name: 'reviewer' },
-  { key: 'quality', phase: 'Quality', agentType: 'atdd:quality-tester', name: 'quality gate' },
-  { key: 'qa', phase: 'QA', agentType: 'atdd:qa', name: 'QA' },
+  { key: 'review', phase: 'Review', agentType: 'atdd:reviewer', name: 'reviewer', schema: CHECK },
+  { key: 'quality', phase: 'Quality', agentType: 'atdd:quality-tester', name: 'quality gate', schema: CHECK },
+  { key: 'qa', phase: 'QA', agentType: 'atdd:qa', name: 'QA', schema: QA_CHECK },
 ]
 
 const isBlocking = f => f.severity === 'blocker' || f.severity === 'major'
 const json = value => JSON.stringify(value, null, 2)
+const listSkipped = skipped => skipped.map(s => `"${s.scenario}" (${s.reason})`).join('; ')
+const skippedNote = fresh => fresh.length ? `Newly skipped: ${listSkipped(fresh)}.` : 'Nothing new skipped.'
+
+function recordSkipped(known, skipped) {
+  const fresh = skipped.filter(s => !known.has(s.scenario))
+  for (const s of skipped) known.set(s.scenario, s)
+  return fresh
+}
 
 function context(prep) {
   return [
@@ -135,7 +161,7 @@ function implementPrompt(prep, round, maxRounds, failed) {
   return lines.join('\n\n')
 }
 
-function stagePrompt(stage, prep, round, sha, memory) {
+function stagePrompt(stage, prep, round, sha, memory, skippedEarlier) {
   const lines = [context(prep), `Round ${round}. Commit under test: ${sha} (checked out in the working tree).`]
   if (stage.key === 'review' && memory.lastApproved) {
     lines.push(`You approved ${memory.lastApproved} in an earlier round. Focus on git diff ${memory.lastApproved}..${sha} and whatever it affects; don't re-open code you already approved unless the new change breaks it.`)
@@ -145,6 +171,9 @@ function stagePrompt(stage, prep, round, sha, memory) {
     lines.push(`Replay scripts folder: .atdd/${prep.key}/qa/scenarios/`)
     if (memory.lastTested) {
       lines.push(`You last tested ${memory.lastTested}; the change since is git diff ${memory.lastTested}..${sha}. Work as your playbook's "Later rounds" describes.`)
+      if (skippedEarlier.length) {
+        lines.push(`Scenarios you skipped in an earlier round, so they have no replay script; treat them as your playbook's "Later rounds" describes: ${listSkipped(skippedEarlier)}`)
+      }
     }
   }
   if (stage.key === 'quality') {
@@ -170,6 +199,7 @@ const maxRounds = Math.max(1, prep.maxRounds || 5)
 const memory = Object.fromEntries(stages.map(s => [s.key, { findings: [], responses: [], lastApproved: null }]))
 const history = []
 const advisory = {}
+const unverified = new Map()
 let failed = null
 let sha = null
 
@@ -184,6 +214,7 @@ function report(status, extra) {
     rounds: history.length ? history[history.length - 1].round : 0,
     history,
     advisory: Object.values(advisory).flat(),
+    unverified: [...unverified.values()],
     ...extra,
   }
 }
@@ -211,11 +242,11 @@ for (let round = 1; round <= maxRounds; round++) {
 
   failed = null
   for (const stage of stages) {
-    const result = await agent(stagePrompt(stage, prep, round, sha, memory[stage.key]), {
+    const result = await agent(stagePrompt(stage, prep, round, sha, memory[stage.key], [...unverified.values()]), {
       label: `${stage.key} · round ${round}`,
       phase: stage.phase,
       agentType: stage.agentType,
-      schema: CHECK,
+      schema: stage.schema,
     })
     if (!result) return report('needs-human', { stage: stage.key, reason: `The ${stage.name} agent did not finish.` })
 
@@ -225,14 +256,19 @@ for (let round = 1; round <= maxRounds; round++) {
     memory[stage.key].findings = blocking
     memory[stage.key].responses = []
     if (stage.key === 'review' && blocking.length === 0) memory.review.lastApproved = sha
-    if (stage.key === 'qa') memory.qa.lastTested = sha
+    let outcome = blocking.length
+      ? `Round ${round}: ${stage.name} raised ${blocking.length} blocking finding(s); back to the implementer.`
+      : `Round ${round}: ${stage.name} passed.`
+    if (stage.key === 'qa') {
+      memory.qa.lastTested = sha
+      outcome += ` ${skippedNote(recordSkipped(unverified, result.skipped))}`
+    }
+    log(outcome)
 
     if (blocking.length) {
       failed = { stage, sha, findings: blocking }
-      log(`Round ${round}: ${stage.name} raised ${blocking.length} blocking finding(s); back to the implementer.`)
       break
     }
-    log(`Round ${round}: ${stage.name} passed.`)
   }
 
   if (!failed) {
