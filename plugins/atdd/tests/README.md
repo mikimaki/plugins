@@ -2,7 +2,7 @@
 
 Three kinds, besides the eval cases in `../evals/`:
 
-- **`guard/`**: `scripts/atdd_guard.py` fed synthetic PreToolUse payloads in a throwaway repo: who may edit, commit, push, rebase and open pull requests. `python3 tests/guard/guard_test.py`
+- **`guard/`**: `scripts/atdd_guard.py` fed synthetic PreToolUse payloads in a throwaway repo: who may edit, commit, push, rebase and open pull requests, and which foreground waits QA may run. `python3 tests/guard/guard_test.py`
 
 - **`workflows/`**: the workflow scripts' control flow, with `agent()` and `workflow()` mocked. Fast, no model calls.
 
