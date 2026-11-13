@@ -33,13 +33,21 @@ For each scenario in the feature directory:
 1. **Arrange the Given state the way a user or client would:** through the app's APIs or UI, or with the seeding approach in `qa.notes`. Don't use the test suite's helpers. Bypassing them is the point.
 2. **Perform the When**, and observe the Then with your own requests or eyes.
 3. **Record the result** in `<evidence-dir>/scenarios.md`: one line per scenario with pass or fail and a pointer to the evidence.
+4. **Save its replay script** in `.atdd/<key>/qa/scenarios/`, whether it passed or failed, overwriting last round's.
 
-**For APIs, write each scenario as a Hurl file.** The file is executable, reproducible evidence. If `hurl` isn't installed, use a small curl script with `set -e` and explicit checks instead.
+**Replay scripts.** Every QA run leaves one replay script per scenario in `.atdd/<key>/qa/scenarios/`, so a later round replays all of them with the one command below:
+
+- **API scenarios:** `<scenario>.hurl`, taking the base URL from the `base` variable.
+- **UI scenarios:** `<scenario>.mjs`, a standalone Node script using the `playwright` library (`import { chromium } from 'playwright'`). It reads the base URL from `process.env.BASE`, launches a headless browser, and exits non-zero when a check fails (an uncaught error or a failed `assert` does that).
+- **Self-contained:** each script sets up its own Given state through the app's real interfaces, never relying on what an earlier script or round left behind. Generate unique values (a timestamp or random suffix) where the app forbids duplicates.
+- **No script possible** (no `hurl` installed for an API scenario, no `playwright` package for a UI one): the scenario has no replay script, and a later round hand-tests it. Write its steps in `<evidence-dir>/scenarios.md` instead; a step list isn't a replay script and never goes in the scenarios folder.
+
+Evidence for findings, including curl scripts, stays in `round-<n>/`; the scenarios folder holds only replay scripts.
 
 The example replays a generic "an empty display name is refused" scenario. Your files follow your scenarios and your API.
 
 ```hurl
-# .atdd/proj-45/qa/round-1/empty-display-name-refused.hurl
+# .atdd/proj-45/qa/scenarios/empty-display-name-refused.hurl
 POST {{base}}/users
 Content-Type: application/json
 { "displayName": "Robin" }
@@ -60,9 +68,16 @@ HTTP 200
 jsonpath "$.displayName" == "Robin"
 ```
 
+**Replay command.** One invocation runs every script in the folder, API and UI, and fails if any of them fails:
+
 ```bash
-hurl --test --variable base=<qa.baseUrl> .atdd/proj-45/qa/round-1/*.hurl
+BASE=<qa.baseUrl> sh -c 'cd .atdd/<key>/qa/scenarios || exit 1; rc=0
+for f in *.hurl; do [ -e "$f" ] && { hurl --test --variable base="$BASE" "$f" || rc=1; }; done
+for f in *.mjs; do [ -e "$f" ] && { node "$f" || rc=1; }; done
+exit $rc'
 ```
+
+A scenario whose script fails shows in the output by file name.
 
 **For UI** (when `qa.ui` is true), use the Playwright MCP browser tools when they're available. Find them with ToolSearch under the `playwright` prefix.
 
@@ -71,7 +86,7 @@ hurl --test --variable base=<qa.baseUrl> .atdd/proj-45/qa/round-1/*.hurl
 - Click and type like a user.
 - Take a screenshot for every failure and every scenario's end state.
 
-Without the MCP tools, a short Playwright script via `npx playwright` works too. Save it as evidence.
+Without the MCP tools, run the scenario's `.mjs` replay script with `node` directly. Either way, save the scenario's replay script in the scenarios folder.
 
 **Time-dependent scenarios:** use the app's test clock if `qa.notes` names one. Otherwise test what you can with data timestamps, and mark the scenario `not manually verifiable: needs a controllable clock` (a minor finding).
 
@@ -146,10 +161,17 @@ evidence: .atdd/proj-45/qa/round-1/qa-3.hurl, qa-3.response.json, app.log lines 
 ```
 
 **Severity:**
-- **Blocker:** a scenario fails against the real app; data loss; a security hole; the app doesn't start.
+- **Blocker:** a scenario fails against the real app by hand; a scenario that passed before fails on replay; data loss; a security hole; the app doesn't start.
 - **Major:** spec-defined behavior is wrong outside the scenarios' exact examples; a swallowed or meaningless error; a reachable unhandled exception.
 - **Minor:** cosmetic issues, wording, pre-existing issues.
 
-**In re-test rounds:**
-1. Rerun the evidence for each earlier finding first.
-2. Then replay all scenarios. Fixes often break neighbors.
+## 5. Later rounds
+
+When the prompt names the commit you last tested, sections 2 and 3 shrink to three steps:
+
+1. **Re-test every earlier finding by hand** first, rerunning its evidence.
+2. **Replay all saved scripts** with the replay command in section 2. Fixes often break neighbors. Hand-test only the scenarios that have no script, following the steps in last round's `scenarios.md`. Save fresh replay scripts as in section 2.
+3. **Explore only around** `git diff <last tested>..<commit under test>` and what it affects, with section 3's heuristics.
+
+- A replay failure of a scenario that passed before is a **blocker**. Attach the replay output as evidence.
+- A script that can't run again because of leftover state (a duplicate unique value, a record from last round) is not a finding. Fix the script so it sets up its own state, and hand-test that scenario this round.

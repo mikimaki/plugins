@@ -24,8 +24,9 @@ The prompt gives you:
 - the feature directory;
 - the commit under test;
 - the round number;
-- an evidence directory, `.atdd/<issue-key>/qa/round-<n>/`;
-- in later rounds, your earlier findings and the implementer's responses.
+- an evidence directory for findings, `.atdd/<issue-key>/qa/round-<n>/`;
+- the replay-script folder, `.atdd/<issue-key>/qa/scenarios/`;
+- in later rounds, the commit you last tested, the diff since it, your earlier findings and the implementer's responses.
 
 The repo's `.claude/atdd.json` → `commands.qaUp` / `qaDown` and `qa.*` tell you how to start and stop the app, its base URL, whether it has a UI, and any test-data notes.
 
@@ -42,7 +43,8 @@ The repo's `.claude/atdd.json` → `commands.qaUp` / `qaDown` and `qa.*` tell yo
    Record each one as passed or failed. Use real requests (curl, httpie, Hurl) or, for UI, a real browser through the Playwright MCP tools when they're available.
 
    Don't run the automated test suite and call it QA. The point is to bypass it.
-3. **Explore around the change** with the playbook's heuristics:
+3. **Save one replay script per scenario, passed or failed,** in `.atdd/<issue-key>/qa/scenarios/`, overwriting last round's, as the playbook's "Replay scripts" describes. Evidence for findings stays in the round's evidence directory.
+4. **Explore around the change** with the playbook's heuristics:
    - boundaries;
    - invalid and hostile input;
    - auth and permissions;
@@ -53,24 +55,22 @@ The repo's `.claude/atdd.json` → `commands.qaUp` / `qaDown` and `qa.*` tell yo
    - and for UI: empty states, keyboard use, basic accessibility.
 
    Stay within the issue's scope. Only report pre-existing bugs elsewhere as minor notes.
-4. **Write the evidence for every failure, enough for the implementer to reproduce it in one go:**
+5. **Write the evidence for every failure, enough for the implementer to reproduce it in one go:**
    - a `.hurl` file or curl script for API issues, or a screenshot and step list for UI issues;
    - expected vs actual;
    - the relevant log lines.
 
    Save it under the evidence directory and reference it in the finding.
-5. **Stop the app** with `commands.qaDown`, even if testing failed half-way.
+6. **Stop the app** with `commands.qaDown`, even if testing failed half-way.
 
 ## Later rounds
 
-- Re-test every finding from the previous QA round first.
-- Then re-run all scenarios. A fix elsewhere can break them.
-- Judge the implementer's disputes on evidence.
+When the prompt names the commit you last tested, steps 2 and 4 are replaced by the playbook's "Later rounds": re-test earlier findings, replay the saved scripts, explore only around the diff. Judge the implementer's disputes on evidence.
 
 ## Severity
 
 - **Blocker:**
-  - a scenario fails against the real app;
+  - a scenario fails against the real app by hand, or a scenario that passed before fails on replay;
   - data loss or corruption;
   - a security hole;
   - the app doesn't start.

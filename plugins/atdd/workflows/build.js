@@ -140,7 +140,13 @@ function stagePrompt(stage, prep, round, sha, memory) {
   if (stage.key === 'review' && memory.lastApproved) {
     lines.push(`You approved ${memory.lastApproved} in an earlier round. Focus on git diff ${memory.lastApproved}..${sha} and whatever it affects; don't re-open code you already approved unless the new change breaks it.`)
   }
-  if (stage.key === 'qa') lines.push(`Evidence directory: .atdd/${prep.key}/qa/round-${round}/`)
+  if (stage.key === 'qa') {
+    lines.push(`Evidence directory for findings: .atdd/${prep.key}/qa/round-${round}/`)
+    lines.push(`Replay scripts folder: .atdd/${prep.key}/qa/scenarios/`)
+    if (memory.lastTested) {
+      lines.push(`You last tested ${memory.lastTested}; the change since is git diff ${memory.lastTested}..${sha}. Work as your playbook's "Later rounds" describes.`)
+    }
+  }
   if (stage.key === 'quality') {
     lines.push(`Run the gate with ATDD_BASE=${prep.base} ATDD_SCENARIOS_COMMIT=${prep.scenariosCommit} ATDD_OUT=.atdd/${prep.key}/quality/round-${round}`)
   }
@@ -219,6 +225,7 @@ for (let round = 1; round <= maxRounds; round++) {
     memory[stage.key].findings = blocking
     memory[stage.key].responses = []
     if (stage.key === 'review' && blocking.length === 0) memory.review.lastApproved = sha
+    if (stage.key === 'qa') memory.qa.lastTested = sha
 
     if (blocking.length) {
       failed = { stage, sha, findings: blocking }
