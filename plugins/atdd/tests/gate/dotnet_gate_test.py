@@ -47,7 +47,14 @@ public static class GatewayTimeouts
 }
 """
 
-FAILING_PUSH_FEATURE = """Feature: Slow push
+DIRECTORY_BUILD_PROPS = """<Project>
+  <PropertyGroup>
+    <Deterministic>true</Deterministic>
+  </PropertyGroup>
+</Project>
+"""
+
+FAILING_PUSH_FEATURE ="""Feature: Slow push
 
   Scenario: The gateway answers in time
     Given the push gateway
@@ -93,6 +100,17 @@ class DotnetGateTest(unittest.TestCase):
         fixture.add_to_feature(self.repo, "tests/Steps.Push.Tests/GatewayTimeouts.cs", GATEWAY_TIMEOUTS)
         self.assert_tests_fail(fixture.run_gate(self.repo, "fast", "--only", "tests"),
                                "tests/Steps.Push.Tests/GatewayTimeouts.cs")
+
+    def test_failing_test_fails_when_a_build_file_outside_every_project_changed(self):
+        fixture.add_to_base(self.repo, "tests/Steps.Push.Tests/SlowGatewayTests.cs", FAILING_PUSH_TEST)
+        fixture.add_to_feature(self.repo, "Directory.Build.props", DIRECTORY_BUILD_PROPS)
+        self.assert_tests_fail(fixture.run_gate(self.repo, "fast", "--only", "tests"), "Directory.Build.props")
+
+    def test_failing_test_stays_flaky_when_only_a_file_outside_projects_that_builds_nothing_changed(self):
+        fixture.add_to_base(self.repo, "tests/Steps.Push.Tests/SlowGatewayTests.cs", FAILING_PUSH_TEST)
+        fixture.add_to_feature(self.repo, "docs/push.md", "# Push\n")
+        tests = check(fixture.run_gate(self.repo, "fast", "--only", "tests"), "tests")
+        self.assertEqual("flaky", tests["status"], tests["detail"])
 
     def test_failing_scenario_whose_project_reaches_no_changed_project_is_flaky(self):
         fixture.add_to_base(self.repo, "tests/Steps.Acceptance/Features/SlowPush.feature", FAILING_PUSH_FEATURE)

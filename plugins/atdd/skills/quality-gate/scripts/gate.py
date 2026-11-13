@@ -727,11 +727,18 @@ def run_dotnet_test(g: Gate, results: Path, test_filter: str | None = None) -> i
     return code
 
 
+# Files MSBuild or the SDK read for every project below them.
+DOTNET_SHARED_BUILD_FILE = re.compile(r"(?:^|/)(?:[^/]+\.(?:props|targets|sln|slnx)|global\.json|nuget\.config)$",
+                                      re.IGNORECASE)
+
+
 def classify_dotnet_failures(g: Gate, results: Path) -> dict:
     """{fully qualified test name: Verdict} for every failing test in the TRX reports; empty when a report doesn't say
     which test project a failure ran from, so the failure stays a plain one. Reachability is judged per project: a
     failure is flaky when no file of its test project, or of a project that one references directly or transitively,
-    changed since the base. A Reqnroll scenario's .feature file belongs to its test project, so the same rule holds."""
+    changed since the base. A Reqnroll scenario's .feature file belongs to its test project, so the same rule holds.
+    A build file outside every project folder (Directory.Build.props, global.json, a solution) belongs to every
+    project below its folder."""
     references = project_references(g)
     folders = {posixpath.dirname(p) or ".": p for p in references}
     changed = {}
@@ -739,6 +746,11 @@ def classify_dotnet_failures(g: Gate, results: Path) -> dict:
         owner = owner_of(path, set(folders))
         if owner in folders:
             changed.setdefault(folders[owner], []).append(path)
+        elif DOTNET_SHARED_BUILD_FILE.search(path):
+            above = posixpath.dirname(path)
+            for folder, project in folders.items():
+                if not above or folder == above or folder.startswith(above + "/"):
+                    changed.setdefault(project, []).append(path)
     verdicts = {}
     for name, assembly in failing_trx_tests(results):
         path = repo_path(g, assembly)
