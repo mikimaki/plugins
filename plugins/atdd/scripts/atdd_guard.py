@@ -518,8 +518,7 @@ def check_gh(agent: str, data: dict, root: Path, config: dict) -> int:
 MAX_FOREGROUND_TIMEOUT_MS = 120000
 MAX_FOREGROUND_SLEEP_SECONDS = 30
 SLEEP_UNIT_SECONDS = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
-QUOTED = re.compile(r"'[^']*'|\"(?:\\.|[^\"\\])*\"")
-SHELL_LOOP = re.compile(r"(?:^|[;&|({`\n])\s*(?:until|while|for)\s")
+SHELL_LOOP = re.compile(r"(?:^|[;&|({`\n\"'])\s*(?:until|while|for)\s")
 SLEEP = re.compile(r"(?:^|[\s;&|({`])sleep(?:\s+([0-9.]+|inf(?:inity)?)([smhd]?))?")
 WAIT_GUIDANCE = (
     "QA doesn't wait in the foreground for more than 2 minutes of real time. Instead: run the command in the background "
@@ -535,7 +534,7 @@ def check_wait(agent: str, data: dict) -> int:
     if int(tool_input.get("timeout") or 0) > MAX_FOREGROUND_TIMEOUT_MS:
         return deny(f"Refused: a foreground timeout over {MAX_FOREGROUND_TIMEOUT_MS} ms. {WAIT_GUIDANCE}")
     command = tool_input.get("command", "")
-    if SHELL_LOOP.search(QUOTED.sub("''", command)) and SLEEP.search(command):
+    if SHELL_LOOP.search(command) and SLEEP.search(command):
         return deny(f"Refused: a foreground shell loop with sleep. {WAIT_GUIDANCE}")
     for amount, unit in SLEEP.findall(command):
         if amount and float(amount) * SLEEP_UNIT_SECONDS[unit] > MAX_FOREGROUND_SLEEP_SECONDS:

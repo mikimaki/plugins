@@ -156,6 +156,8 @@ with tempfile.TemporaryDirectory() as tmp:
     E("allow", "wait", QA, "sleep 30", "QA sleeps exactly 30 seconds")
     E("allow", "wait", QA, "for f in .atdd/evidence/*.hurl; do hurl --test \"$f\"; done", "QA loops without sleep")
     E("allow", "wait", QA, "echo \"waiting for the app\" && sleep 2", "QA echoes a loop keyword inside quotes, then sleeps briefly")
+    E("deny", "wait", QA, "bash -c \"while true; do sleep 1; done\"", "QA polls with a while/sleep loop in double-quoted bash -c")
+    E("deny", "wait", QA, "bash -c 'until curl -sf localhost:3000; do sleep 1; done'", "QA polls with an until/sleep loop in single-quoted bash -c")
     LONG_WAITS = [{"command": "npm run build", "timeout": 600000},
                   {"command": "until curl -sf localhost:3000/health; do sleep 2; done"},
                   {"command": "sleep 300"}]
