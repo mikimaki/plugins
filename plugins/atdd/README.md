@@ -1,6 +1,6 @@
 # atdd: a Gherkin-first ATDD pipeline for Claude Code
 
-Turns a spec from your issue tracker into reviewed Gherkin, then into an implementation. The implementation must survive a code reviewer, a manual QA pass and a brutal deterministic quality gate. Each failed check sends the work back to the implementer.
+Turns a spec from your issue tracker into reviewed Gherkin, then into an implementation. The implementation must survive a code reviewer, a brutal deterministic quality gate and a manual QA pass. Each failed check sends the work back to the implementer.
 
 For behavior the code already has, `/atdd:cover` turns the same reviewed Gherkin into acceptance tests instead, and changes nothing else. That's the way into a platform that has no acceptance tests yet: cover what it does first, then refactor with the tests as a safety net. `/atdd:cover-queue` does that for a whole inventory of Gherkin, unattended, one `.feature` file and one PR at a time.
 
@@ -16,7 +16,7 @@ Matt Pocock's skills (you)            this plugin
                                    /atdd:build <issue>
                                       preparer      commit the scenarios, record the base
                                       implementer   step definitions + code → commit (commit hook runs the fast gate)
-                                      → reviewer → qa → quality-tester    (fail-fast, ≤ 5 rounds)
+                                      → reviewer → quality-tester → qa    (fail-fast, ≤ 5 rounds)
                                       any blocker/major finding → implementer, then restart at reviewer
 
                                    or, when the code already does what the scenarios say:
