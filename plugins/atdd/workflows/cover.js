@@ -1,12 +1,11 @@
 export const meta = {
   name: 'cover',
-  description: 'Cover behavior the code already has with acceptance tests bound to approved Gherkin scenarios, changing nothing but tests, then run coverage reviewer → QA → test-quality gate, sending blocking findings back to the acceptance-test-coverer until all three pass',
+  description: 'Cover behavior the code already has with acceptance tests bound to approved Gherkin scenarios, changing nothing but tests, then run coverage reviewer → test-quality gate, sending blocking findings back to the acceptance-test-coverer until both pass',
   whenToUse: 'After /atdd:gherkin produced approved scenarios for behavior the platform already has, when you want them as acceptance tests (a safety net for later refactoring) without any change to the production code. Pass the issue reference as args, e.g. "PROJ-45".',
   phases: [
     { title: 'Prepare', detail: 'check the scenarios, the test paths and the branch; commit the scenarios' },
     { title: 'Cover', detail: 'acceptance-test-coverer: step definitions against the existing code, then commit' },
     { title: 'Review', detail: 'coverage-reviewer: only tests changed, honest steps, a safety net worth trusting' },
-    { title: 'QA', detail: 'coverage-qa: replay every scenario against the running app' },
     { title: 'Quality', detail: 'coverage-quality-tester: test-code gate, acceptance coverage and mutation' },
   ],
 }
@@ -59,7 +58,6 @@ const PREP = {
     unfinishedWork: STRINGS,
     workDir: { type: 'string' },
     maxRounds: { type: 'integer' },
-    hasQa: { type: 'boolean' },
     failureScope: { type: 'string', enum: ['unit', 'repo'] },
   },
 }
@@ -139,7 +137,6 @@ const CHECK = {
 
 const STAGES = [
   { key: 'review', phase: 'Review', agentType: 'atdd:coverage-reviewer', name: 'coverage reviewer' },
-  { key: 'qa', phase: 'QA', agentType: 'atdd:coverage-qa', name: 'QA' },
   { key: 'quality', phase: 'Quality', agentType: 'atdd:coverage-quality-tester', name: 'quality gate' },
 ]
 
@@ -192,7 +189,6 @@ function stagePrompt(stage, prep, round, sha, memory) {
   if (stage.key === 'review' && memory.lastApproved) {
     lines.push(`You approved ${memory.lastApproved} in an earlier round. Focus on git diff ${memory.lastApproved}..${sha} and whatever it affects, but check again that nothing outside the test paths changed on the whole branch.`)
   }
-  if (stage.key === 'qa') lines.push(`Evidence directory: ${workDir(prep)}/qa/round-${round}/`)
   if (stage.key === 'quality') {
     lines.push(`Run the gate with ATDD_BASE=${prep.base} ATDD_SCENARIOS_COMMIT=${prep.scenariosCommit} ATDD_COVER_TARGETS=${targetsFile(prep)} ATDD_OUT=${workDir(prep)}/quality/round-${round}`)
   }
@@ -227,11 +223,8 @@ if (!prep.ok) return { status: 'needs-human', stage: 'prepare', scope: prep.fail
 if (!(prep.testPaths || []).length) return { status: 'needs-human', stage: 'prepare', scope: 'repo', reason: 'The preparer reported no test paths; set gate.testDirs or cover.testPaths in .claude/atdd.json.', agentCalls, ...unitFields }
 if (prep.baseNote) log(`Base: ${prep.baseNote}`)
 
-const stages = STAGES.filter(s => s.key !== 'qa' || prep.hasQa)
-if (!prep.hasQa) log('No commands.qaUp in .claude/atdd.json, so the QA stage is skipped. Run /atdd:init to set it up.')
-
 const maxRounds = Math.max(1, prep.maxRounds || 5)
-const memory = Object.fromEntries(stages.map(s => [s.key, { findings: [], responses: [], lastApproved: null }]))
+const memory = Object.fromEntries(STAGES.map(s => [s.key, { findings: [], responses: [], lastApproved: null }]))
 const history = []
 const advisory = {}
 let failed = null
@@ -301,7 +294,7 @@ for (let round = 1; round <= maxRounds; round++) {
   }
 
   failed = null
-  for (const stage of stages) {
+  for (const stage of STAGES) {
     const result = await run(stagePrompt(stage, prep, round, sha, memory[stage.key]), {
       label: `${stage.key} · round ${round}`,
       phase: stage.phase,
