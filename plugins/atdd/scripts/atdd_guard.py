@@ -4,6 +4,7 @@
     atdd_guard.py edit   # Edit / Write / NotebookEdit
     atdd_guard.py git    # Bash commands that invoke git
     atdd_guard.py gh     # Bash commands that invoke the GitHub CLI
+    atdd_guard.py wait   # every Bash command: QA's foreground waits
 
 Does nothing for the main session, for other agents, and in repos without .claude/atdd.json.
 For atdd agents it enforces who may write where and which git commands they may run, and
@@ -13,6 +14,8 @@ gated on locked files, on nothing outside the test paths having changed, and on 
 fast checks. The preparer commits only test paths, and pushes only the unit branches
 /atdd:cover-queue created, never the base or integration branch, and never by force. Only the
 preparer may open a pull request; every other gh command an atdd agent runs must only read.
+QA never waits in the foreground for long: a foreground timeout over 2 minutes, a shell loop
+with sleep, or a single sleep over 30 seconds is refused; background commands are allowed.
 """
 
 from __future__ import annotations
@@ -31,7 +34,7 @@ COVERER = "atdd:acceptance-test-coverer"
 PREPARER = "atdd:preparer"
 GHERKIN_WRITER = "atdd:gherkin-writer"
 READ_ONLY = {"atdd:gherkin-reviewer", "atdd:reviewer", "atdd:qa", "atdd:quality-tester", GHERKIN_WRITER,
-             "atdd:coverage-reviewer", "atdd:coverage-qa", "atdd:coverage-quality-tester"}
+             "atdd:coverage-reviewer", "atdd:coverage-quality-tester"}
 COMMITTERS = {IMPLEMENTER: "the implementer", COVERER: "the acceptance-test-coverer"}
 DEFAULT_COVER_FAST_CHECKS = "python3 scripts/atdd/gate.py cover-fast"
 
@@ -511,6 +514,34 @@ def check_gh(agent: str, data: dict, root: Path, config: dict) -> int:
     return allow()
 
 
+QA = "atdd:qa"
+MAX_FOREGROUND_TIMEOUT_MS = 120000
+MAX_FOREGROUND_SLEEP_SECONDS = 30
+SLEEP_UNIT_SECONDS = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
+SHELL_LOOP = re.compile(r"(?:^|[\s;&|({])(?:until|while|for)\s")
+SLEEP = re.compile(r"(?:^|[\s;&|({])sleep(?:\s+([0-9.]+)([smhd]?))?")
+WAIT_GUIDANCE = (
+    "QA doesn't wait in the foreground for more than 2 minutes of real time. Instead: run the command in the background "
+    "(run_in_background) and monitor its output; use the app's test clock if qa.notes names one; or skip the scenario "
+    "and report it as needing more than 2 minutes of real waiting."
+)
+
+
+def check_wait(agent: str, data: dict) -> int:
+    tool_input = data.get("tool_input") or {}
+    if agent != QA or tool_input.get("run_in_background"):
+        return allow()
+    if int(tool_input.get("timeout") or 0) > MAX_FOREGROUND_TIMEOUT_MS:
+        return deny(f"Refused: a foreground timeout over {MAX_FOREGROUND_TIMEOUT_MS} ms. {WAIT_GUIDANCE}")
+    command = tool_input.get("command", "")
+    if SHELL_LOOP.search(command) and SLEEP.search(command):
+        return deny(f"Refused: a foreground shell loop with sleep. {WAIT_GUIDANCE}")
+    for amount, unit in SLEEP.findall(command):
+        if amount and float(amount) * SLEEP_UNIT_SECONDS[unit] > MAX_FOREGROUND_SLEEP_SECONDS:
+            return deny(f"Refused: a foreground sleep over {MAX_FOREGROUND_SLEEP_SECONDS} seconds. {WAIT_GUIDANCE}")
+    return allow()
+
+
 def main() -> int:
     mode = sys.argv[1] if len(sys.argv) > 1 else ""
     data = json.load(sys.stdin)
@@ -529,6 +560,8 @@ def main() -> int:
         return check_git(agent, data, root, config)
     if mode == "gh":
         return check_gh(agent, data, root, config)
+    if mode == "wait":
+        return check_wait(agent, data)
     return allow()
 
 

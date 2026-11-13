@@ -1,7 +1,8 @@
 import { run } from './run.mjs'
+import { readFileSync } from 'node:fs'
 import assert from 'node:assert/strict'
 const C = process.argv[2]
-const prep = { ok: true, key: 'a01', title: 'Goals', specPath: '.atdd/a01/spec.md', featureDir: 'features/a01/', featureFiles: ['features/a01/goal-range.feature'], scenarioCount: 2, branch: 'atdd/cover-a01-goal-range', parent: 'atdd/cover-a01-accepted-goals', base: 'b1', baseNote: '', scenariosCommit: 's1', testPaths: ['tests/**', 'features/**'], unfinishedWork: [], workDir: '.atdd/a01/cover/goal-range', maxRounds: 2, hasQa: false }
+const prep = { ok: true, key: 'a01', title: 'Goals', specPath: '.atdd/a01/spec.md', featureDir: 'features/a01/', featureFiles: ['features/a01/goal-range.feature'], scenarioCount: 2, branch: 'atdd/cover-a01-goal-range', parent: 'atdd/cover-a01-accepted-goals', base: 'b1', baseNote: '', scenariosCommit: 's1', testPaths: ['tests/**', 'features/**'], unfinishedWork: [], workDir: '.atdd/a01/cover/goal-range', maxRounds: 2 }
 const unitArgs = { issue: 'a01', unit: { source: 'inventory', feature: 'features/a01/goal-range.feature', branch: 'atdd/cover-a01-goal-range', stackTop: 'atdd/cover-a01-accepted-goals' } }
 const cover = (over = {}) => ({ sha: 'c1', summary: '', targets: ['src/goals.py'], testsRun: [], responses: [], discrepancies: [], blocked: false, ...over })
 const pass = { verdict: 'pass', findings: [], summary: 'ok', results: [{ name: 'acceptance-coverage', status: 'warn', detail: '95%' }] }
@@ -51,4 +52,17 @@ const make = s => { const sc = JSON.parse(JSON.stringify(s)); return async (p, o
   assert.equal(result.status, 'done'); assert.equal(result.unit, undefined); assert.equal(prompts[0], 'Mode: cover. Issue reference: PROJ-45')
   assert.match(prompts[1], /\.atdd\/a01\/cover\/targets\.txt/); assert.match(result.next, /push the branch and open a PR/)
   console.log('plain ok')
+}
+// no QA stage: coverage reviewer, then the cover gate, even when the repo can start the app
+{
+  const calls = []
+  const { result, logs } = await run(C, { args: 'PROJ-45', agent: async (p, o) => { calls.push(o); return make({ 'atdd:preparer': [{ ...prep, hasQa: true }], 'atdd:acceptance-test-coverer': [cover()], 'atdd:coverage-reviewer': [pass], 'atdd:coverage-quality-tester': [pass] })(p, o) } })
+  assert.equal(result.status, 'done')
+  assert.deepEqual(calls.map(o => o.agentType), ['atdd:preparer', 'atdd:acceptance-test-coverer', 'atdd:coverage-reviewer', 'atdd:coverage-quality-tester'])
+  assert.deepEqual(result.history.map(h => h.stage), ['review', 'quality'])
+  assert.ok(!logs.some(l => /QA/.test(l)), logs.join('\n'))
+  const meta = new Function(readFileSync(C, 'utf8').match(/export const meta = (\{[\s\S]*?\n\})/)[1].replace(/^/, 'return '))()
+  assert.deepEqual(meta.phases.map(ph => ph.title), ['Prepare', 'Cover', 'Review', 'Quality'])
+  assert.doesNotMatch(meta.description, /QA/)
+  console.log('no qa ok')
 }
