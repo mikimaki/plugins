@@ -80,7 +80,7 @@ PUSH_GATEWAY = """namespace Steps.Push;
 
 public static class PushGateway
 {
-    public const string Url = "https://push.example.com";
+    public static string Url => "https://push.example.com";
 }
 """
 

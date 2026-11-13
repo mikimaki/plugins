@@ -804,6 +804,11 @@ def dotnet_flaky_filter(g: Gate) -> str:
     return "&".join("FullyQualifiedName!=" + re.sub(r"([\\()&|=!~])", r"\\\1", name) for name in g.flaky_tests)
 
 
+def dotnet_flaky_env(g: Gate) -> dict | None:
+    """The environment that hands a Stryker.NET override the filter leaving out the flaky tests."""
+    return {"ATDD_FLAKY_TEST_FILTER": dotnet_flaky_filter(g)} if g.flaky_tests else None
+
+
 class Verdict(NamedTuple):
     flaky: bool
     why: str
@@ -1580,11 +1585,15 @@ def check_mutation(g: Gate, r: Result) -> None:
             return
         high, low = max(limit, 90), limit
         shutil.rmtree(out, ignore_errors=True)
-        command = override or (
-            f"dotnet stryker --solution {shlex.quote(solution)} --since:{g.base} -r json -r cleartext -r progress "
-            f"--threshold-high {high} --threshold-low {low} --break-at {limit} -O {shlex.quote(str(out))}"
-            + write_stryker_config_without_flaky_tests(g))
-        code = g.run("mutation", command, env={"ATDD_FLAKY_TEST_FILTER": dotnet_flaky_filter(g)} if g.flaky_tests else None)
+        try:
+            command = override or (
+                f"dotnet stryker --solution {shlex.quote(solution)} --since:{g.base} -r json -r cleartext -r progress "
+                f"--threshold-high {high} --threshold-low {low} --break-at {limit} -O {shlex.quote(str(out))}"
+                + write_stryker_net_config(g, "stryker-config.json", dotnet_flaky_filter(g)))
+        except GateError as error:
+            r.status, r.detail = "fail", str(error)
+            return
+        code = g.run("mutation", command, env=dotnet_flaky_env(g))
         report = out / "reports" / "mutation-report.json"
     elif g.node:
         incremental = g.root / ".atdd" / "cache" / "stryker-incremental.json"
@@ -1645,20 +1654,26 @@ def check_mutation(g: Gate, r: Result) -> None:
                     + "\n".join(result["survivors"][:40]))
 
 
-def write_stryker_config_without_flaky_tests(g: Gate) -> str:
-    """Stryker.NET takes a test filter only from its config file, so when tests were classified flaky this writes a
-    copy of the repo's stryker-config.json with a filter leaving them out and returns the option that points at it."""
-    if not g.flaky_tests:
+def write_stryker_net_config(g: Gate, name: str, *filters: str) -> str:
+    """Stryker.NET before 5.1 takes a test filter only from a config file, so this writes <out>/<name>: a copy of the
+    repo's stryker-config.json (the one Stryker.NET reads from the repo root) with these VSTest filters joined to the
+    one it sets. Returns the option that points Stryker.NET at it; empty when there's no filter to add."""
+    if not any(filters):
         return ""
     repo_config = g.root / "stryker-config.json"
+    yaml = [n for n in ("stryker-config.yaml", "stryker-config.yml") if (g.root / n).is_file()]
+    if yaml and not repo_config.is_file():
+        raise GateError(f"{yaml[0]} is YAML, which the gate can't extend with a test filter. Convert it to "
+                        "stryker-config.json, or set the gate.commands override and apply $ATDD_FLAKY_TEST_FILTER "
+                        "in it yourself.")
     try:
         config = json.loads(repo_config.read_text(encoding="utf-8")) if repo_config.is_file() else {}
     except (OSError, json.JSONDecodeError) as error:
-        raise GateError(f"Can't read stryker-config.json ({error}), so the flaky tests can't be left out") from None
+        raise GateError(f"Can't read stryker-config.json ({error}), so the gate can't add its test filter.") from None
     settings = config.setdefault("stryker-config", {})
-    existing = settings.get("test-case-filter")
-    settings["test-case-filter"] = f"({existing})&{dotnet_flaky_filter(g)}" if existing else dotnet_flaky_filter(g)
-    path = g.out / "stryker-config.json"
+    parts = [f for f in (settings.get("test-case-filter"), *filters) if f]
+    settings["test-case-filter"] = parts[0] if len(parts) == 1 else "&".join(f"({p})" for p in parts)
+    path = g.out / name
     path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
     return f" -f {shlex.quote(g.rel(path))}"
 
@@ -1667,7 +1682,11 @@ def without_flaky_tests(g: Gate) -> dict:
     """Environment that makes every pytest run, mutmut's included, deselect the tests classified flaky."""
     if not g.flaky_tests:
         return {}
-    return appended_to_environment("PYTEST_ADDOPTS", " ".join(f"--deselect {shlex.quote(t)}" for t in g.flaky_tests))
+    return appended_to_environment("PYTEST_ADDOPTS", " ".join(flaky_deselections(g)))
+
+
+def flaky_deselections(g: Gate) -> list:
+    return [f"--deselect {shlex.quote(t)}" for t in g.flaky_tests]
 
 
 def appended_to_environment(name: str, value: str, separator: str = " ") -> dict:
@@ -2060,6 +2079,12 @@ def node_exclusion(g: Gate, run: NodeTestRun) -> str:
         return f" --grep-invert {shlex.quote(pattern)} --pass-with-no-tests"
     option = "--name" if run.runner == "cucumber" else "-t"
     return f" {option} {shlex.quote(f'^(?!(?:{alternatives})$)')}"
+
+
+def node_command_without_flaky(g: Gate, command: str) -> str:
+    """The test command with options that leave out the tests it ran that were classified flaky."""
+    runs = {f.run for f in g.failing_node_tests if f.run.command == command}
+    return command + "".join(node_exclusion(g, run) for run in runs)
 
 
 def node_failures(g: Gate, run: NodeTestRun) -> list:
@@ -2993,6 +3018,7 @@ def check_acceptance_mutation(g: Gate, r: Result) -> None:
         python_acceptance_mutation(g, r, targets, override)
         return
     configured_report = g.gate_config.get("acceptanceMutationReport")
+    env = None
     if g.stack == "dotnet":
         solution = g.gate_config.get("solution", "")
         if not solution and not override:
@@ -3002,9 +3028,15 @@ def check_acceptance_mutation(g: Gate, r: Result) -> None:
         shutil.rmtree(out, ignore_errors=True)
         test_filter = g.gate_config.get("acceptanceTestFilter", "FullyQualifiedName~Acceptance")
         mutate = " ".join(f"-m {shlex.quote('**/' + Path(t).name)}" for t in targets)
-        command = override or (
-            f"dotnet stryker --solution {shlex.quote(solution)} {mutate} --test-case-filter {shlex.quote(test_filter)} "
-            f"-r json -r cleartext -r progress -O {shlex.quote(str(out))}")
+        try:
+            command = override or (
+                f"dotnet stryker --solution {shlex.quote(solution)} {mutate} -r json -r cleartext -r progress "
+                f"-O {shlex.quote(str(out))}"
+                + write_stryker_net_config(g, "acceptance-stryker-config.json", test_filter, dotnet_flaky_filter(g)))
+        except GateError as error:
+            r.status, r.detail = "fail", str(error)
+            return
+        env = dotnet_flaky_env(g)
         report = out / "reports" / "mutation-report.json"
     else:
         acceptance = g.configured_command("acceptanceTests")
@@ -3018,13 +3050,14 @@ def check_acceptance_mutation(g: Gate, r: Result) -> None:
         # The command runner runs the whole acceptance suite per mutant. StrykerJS's Cucumber runner would be faster,
         # but 10.1 can't load its formatter in Cucumber 13, which splits the file: URL it passes at the colon.
         command = override or (
-            f"npx --no-install stryker run --testRunner command --commandRunner.command {shlex.quote(acceptance)} "
+            f"npx --no-install stryker run --testRunner command "
+            f"--commandRunner.command {shlex.quote(node_command_without_flaky(g, acceptance))} "
             f"--mutate {shlex.quote(','.join(glob_literal(t) for t in targets))} --reporters json,clear-text,progress "
             f"--incremental --incrementalFile {shlex.quote(str(incremental))}")
     if configured_report:
         report = g.root / configured_report
     report.unlink(missing_ok=True)
-    code = g.run("acceptance-mutation", command)
+    code = g.run("acceptance-mutation", command, env=env)
     r.log = g.rel(g.log_path("acceptance-mutation"))
     if not report.exists():
         r.status, r.detail = "fail", (f"Mutation testing didn't produce a report (exit {code}):\n"
@@ -3064,7 +3097,7 @@ def python_acceptance_mutation(g: Gate, r: Result, targets: list, override: str 
     (plugin_dir / "atdd_acceptance_only.py").write_text(ACCEPTANCE_ONLY_PLUGIN, encoding="utf-8")
     env = {
         "PYTHONPATH": os.pathsep.join(p for p in (str(plugin_dir), os.environ.get("PYTHONPATH", "")) if p),
-        **appended_to_environment("PYTEST_ADDOPTS", "-p atdd_acceptance_only"),
+        **appended_to_environment("PYTEST_ADDOPTS", " ".join(["-p atdd_acceptance_only", *flaky_deselections(g)])),
         "ATDD_ACCEPTANCE_DIR": g.gate_config.get("acceptanceTestsDir", "tests/acceptance"),
     }
     modules = sorted({python_module(t) for t in targets})
@@ -3119,7 +3152,7 @@ def report_acceptance_mutants(g: Gate, r: Result, summary: dict, diffs: Path | N
                     + ":\n" + "\n".join(survivors[:40]))
 
 
-FLAKY_EXCLUDED_FROM = ("diff-coverage", "mutation")
+FLAKY_EXCLUDED_FROM = ("diff-coverage", "mutation", "acceptance-mutation")
 
 CHECKS = {
     "production-untouched": check_production_untouched,

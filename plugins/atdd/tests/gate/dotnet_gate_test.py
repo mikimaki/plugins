@@ -91,6 +91,18 @@ class DotnetGateTest(unittest.TestCase):
         self.assertTrue(report["passed"], failures(report))
         self.assertNotIn("tests are failing", (self.repo / check(report, "mutation")["log"]).read_text(encoding="utf-8"))
 
+    def test_cover_gate_mutates_the_targets_with_the_acceptance_tests_alone_without_the_flaky_scenario(self):
+        self.repo = fixture.build(Path(self.tmp.name) / "repo", with_stryker=True)
+        fixture.add_to_base(self.repo, "tests/Steps.Acceptance/Features/SlowPush.feature", FAILING_PUSH_FEATURE)
+        fixture.write(self.repo, ".atdd/targets.txt", "src/Steps.Push/PushGateway.cs\n")
+        report = fixture.run_gate(self.repo, "cover-full", "--only", "tests,acceptance-mutation",
+                                  env={"ATDD_COVER_TARGETS": ".atdd/targets.txt"})
+        self.assertEqual("flaky", check(report, "tests")["status"], check(report, "tests")["detail"])
+        mutation = check(report, "acceptance-mutation")
+        self.assertEqual("pass", mutation["status"], mutation["detail"])
+        self.assertIn("1 of 1 mutant(s)", mutation["metric"])
+        self.assertIn(FLAKY_PUSH_SCENARIO, mutation["detail"])
+
     def test_failing_test_whose_project_references_a_changed_project_transitively_fails(self):
         fixture.add_to_base(self.repo, "tests/Steps.Reports.Tests/SlowReportTests.cs", FAILING_REPORT_TEST)
         self.assert_tests_fail(fixture.run_gate(self.repo, "fast", "--only", "tests"), "src/Steps.Goals/GoalBook.cs")

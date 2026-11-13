@@ -147,6 +147,18 @@ class GateTest(unittest.TestCase):
         self.assertIn("killed", mutation["metric"], mutation["detail"])
         self.assertIn(flaky, mutation["detail"])
 
+    def test_cover_gate_mutates_the_targets_without_the_flaky_scenario(self):
+        fixture.add_to_base(self.repo, "features/push/push.feature", PUSH_FEATURE)
+        fixture.add_to_base(self.repo, "tests/acceptance/test_push_scenarios.py", FAILING_PUSH_SCENARIOS)
+        fixture.write(self.repo, ".atdd/targets.txt", "src/stepgoals/goals.py\n")
+        report = fixture.run_gate(self.repo, "cover-full", "--only", "tests,acceptance-mutation",
+                                  env={"ATDD_COVER_TARGETS": ".atdd/targets.txt"})
+        self.assertEqual("flaky", check(report, "tests")["status"], check(report, "tests")["detail"])
+        mutation = check(report, "acceptance-mutation")
+        self.assertNotIn("mutmut failed", mutation["detail"])
+        self.assertIn("were noticed", mutation["metric"], mutation["detail"])
+        self.assertIn("tests/acceptance/test_push_scenarios.py::", mutation["detail"])
+
     def test_failing_test_added_on_the_branch_fails(self):
         fixture.add_to_feature(self.repo, "tests/unit/test_push.py", FAILING_PUSH_TEST)
         self.assert_tests_fail(fixture.run_gate(self.repo, "fast"), "added or changed on this branch")

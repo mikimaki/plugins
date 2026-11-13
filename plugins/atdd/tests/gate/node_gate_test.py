@@ -203,6 +203,29 @@ class TypeScriptGateTest(unittest.TestCase):
         self.assertFalse(report["passed"])
 
 
+class TypeScriptCoverGateTest(unittest.TestCase):
+    """Cover mode: Next.js skips acceptance mutation (a production build per mutant), so TypeScript alone."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.repo = fixture.build(Path(self.tmp.name) / "repo", "typescript")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_cover_gate_mutates_the_targets_without_the_flaky_scenario(self):
+        fixture.add_to_base(self.repo, "features/push/push.feature", PUSH_FEATURE)
+        fixture.add_to_base(self.repo, "features/steps/push.steps.ts", CUCUMBER_PUSH_STEPS)
+        fixture.write(self.repo, ".atdd/targets.txt", "src/goals.ts\n")
+        report = fixture.run_gate(self.repo, "cover-full", "--only", "tests,acceptance-mutation",
+                                  env={"ATDD_COVER_TARGETS": ".atdd/targets.txt"})
+        self.assertEqual("flaky", check(report, "tests")["status"], check(report, "tests")["detail"])
+        mutation = check(report, "acceptance-mutation")
+        self.assertNotEqual("fail", mutation["status"], mutation["detail"])
+        self.assertIn("were noticed", mutation["metric"], mutation["detail"])
+        self.assertIn(PUSH_SCENARIO, mutation["detail"])
+
+
 class NextJsGateTest(TypeScriptGateTest):
     """The same cases with the Next.js stack, whose scenarios run in playwright-bdd."""
     stack = "nextjs"
