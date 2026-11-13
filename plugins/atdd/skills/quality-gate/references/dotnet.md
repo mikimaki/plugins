@@ -86,7 +86,12 @@ public class LayeringTests
 - **Dependency cycles:**
   - Namespaces: the same helper with `namespaces` compiles all production code under `gate.sourceDirs` and records which namespace's code uses a type declared in another (any use: a parameter, a `new`, a static call, an attribute). `using` directives alone don't count. Compile errors don't stop it; a type it can't resolve just adds no dependency.
   - Projects: the `ProjectReference`s of every `*.csproj` in the repo. MSBuild refuses to build such a cycle, so the build check usually reports it first.
-- **Tests (full mode):** `dotnet test <solution> --collect:"XPlat Code Coverage;Format=json,cobertura" --results-directory <out>/test-results`, which writes one `coverage.json` and one `coverage.cobertura.xml` per test project.
+- **Tests:** `dotnet test <solution> --logger trx --results-directory <out>/test-results`, plus `--collect:"XPlat Code Coverage;Format=json,cobertura"` in full mode, which writes one `coverage.json` and one `coverage.cobertura.xml` per test project.
+- **Flaky tests:** when tests fail, the gate reads the failures from the `.trx` files and classifies each one by project (see "Flaky tests (.NET)" in the skill). For that to work:
+  - Keep tests on VSTest (the default runner). The TRX logger names each failing test's class, method and assembly; the gate maps the assembly back to the test project above its `bin/` folder. On Microsoft.Testing.Platform, with a `testsWithCoverage` override, failures aren't classified.
+  - Reference production code through `ProjectReference`. A test project that compiles production files in with `<Compile Include="../…" />` or reaches them through a package hides the dependency, so a failure there can read as flaky when it isn't.
+  - Keep `.feature` files and step definitions inside the Reqnroll test project, so a change to them counts as a change to that project.
+  - In full mode, flaky tests are left out of the coverage run with `--filter "FullyQualifiedName!=<class>.<method>&…"` (every case of a theory goes) and out of Stryker.NET through `-f <out>/stryker-config.json`: a copy of the repo's `stryker-config.json` with `test-case-filter` set (joined with `&` to any filter already there). A `gate.commands.mutation` override must apply `$ATDD_FLAKY_TEST_FILTER` itself.
 - **Mutation:** `dotnet stryker --solution <sln> --since:<base> -r json … -O <out>/stryker`.
   - Stryker exits 2 below `--break-at`.
   - The gate computes its own score over mutants on **changed lines** from `<out>/stryker/reports/mutation-report.json`.
