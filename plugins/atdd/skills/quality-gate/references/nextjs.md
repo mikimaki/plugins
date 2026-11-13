@@ -82,6 +82,7 @@ Everything in `typescript.md` applies, with these differences:
   - Playwright builds the app with `ATDD_COVERAGE=1`, which turns on the source maps in `next.config.ts`. It then starts `next start` with `NODE_V8_COVERAGE`, so the server records its coverage when Playwright stops it.
   - The `recordBrowserCoverage` fixture records Chromium's coverage of every page and maps it back through the build's source maps.
   - `node scripts/atdd/coverage.mjs merge` merges all three. A line or branch is covered when a unit test, the server or the browser ran it.
+- **Flaky tests:** as for TypeScript, with `npx playwright test --reporter=list,json` (the report goes to `PLAYWRIGHT_JSON_OUTPUT_FILE`) for the acceptance tests, so keep `commands.acceptanceTests` ending in `npx playwright test`. playwright-bdd doesn't say which step definitions a scenario ran, so the gate matches the scenario's steps (from the generated spec) against the step definitions under the test paths. The coverage rerun without the flaky tests builds and starts the app again.
 - **Undefined steps:** `npx bddgen`, which fails on a step without a definition.
 - **Mutation:** StrykerJS runs the Vitest tests only: the acceptance tests need a production build per mutant, which takes far too long. So every rule needs a unit test that pins it, not just a scenario. Each Stryker worker uses its own test database.
 - **Vulnerabilities:** `npm audit --omit=dev --audit-level=high`, or `pnpm audit --prod --audit-level high` when the repo has `pnpm-lock.yaml`.
