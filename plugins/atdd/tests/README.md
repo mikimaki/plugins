@@ -9,6 +9,7 @@ Three kinds, besides the eval cases in `../evals/`:
   ```bash
   node tests/workflows/check.mjs workflows/*.js
   node tests/workflows/queue-test.mjs workflows/cover-queue.js
+  node tests/workflows/build-test.mjs workflows/build.js
   node tests/workflows/cover-test.mjs workflows/cover.js
   ```
 
