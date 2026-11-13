@@ -94,6 +94,22 @@ class TypeScriptGateTest(unittest.TestCase):
         self.assertIn("test/push.test.ts::answers in time", tests["detail"])
         self.assertTrue(report["passed"], failures(report))
 
+    def test_full_gate_measures_coverage_and_mutation_without_the_flaky_tests_and_names_them(self):
+        fixture.add_to_base(self.repo, "test/push.test.ts", FAILING_PUSH_TEST.replace(
+            "it('answers in time'", "it('has a gateway', () => {\n  expect(PUSH_URL).toBeTruthy()\n})\n\nit('answers in time'"))
+        self.add_failing_push_scenario()
+        fixture.configure_stryker(self.repo, vitest={"configFile": "vitest.config.mts", "related": False})
+        report = fixture.run_gate(self.repo, "full")
+        tests = check(report, "tests")
+        self.assertEqual("flaky", tests["status"], tests["detail"])
+        coverage, mutation = check(report, "diff-coverage"), check(report, "mutation")
+        self.assertEqual("pass", coverage["status"], coverage["detail"])
+        self.assertEqual("pass", mutation["status"], mutation["detail"])
+        for flaky in ("test/push.test.ts::answers in time", PUSH_SCENARIO):
+            self.assertIn(flaky, coverage["detail"])
+            self.assertIn(flaky, mutation["detail"])
+        self.assertTrue(report["passed"], failures(report))
+
     def test_failing_test_added_on_the_branch_fails(self):
         fixture.add_to_feature(self.repo, "test/push.test.ts", FAILING_PUSH_TEST)
         self.assert_tests_fail(fixture.run_gate(self.repo, "fast"), "added or changed on this branch")

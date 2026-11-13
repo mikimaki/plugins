@@ -258,6 +258,13 @@ def build(target: Path, stack: str) -> Path:
     return target
 
 
+def configure_stryker(repo: Path, **settings) -> None:
+    """Sets keys of stryker.config.json, uncommitted."""
+    path = repo / "stryker.config.json"
+    path.write_text(json.dumps({**json.loads(path.read_text(encoding="utf-8")), **settings}, indent=2) + "\n",
+                    encoding="utf-8")
+
+
 def run_gate(repo: Path, mode: str, *args: str) -> dict:
     env = {k: v for k, v in os.environ.items() if k not in ("ATDD_BASE", "ATDD_OUT")}
     subprocess.run([sys.executable, "scripts/atdd/gate.py", mode, *args], cwd=repo, env=env, capture_output=True,

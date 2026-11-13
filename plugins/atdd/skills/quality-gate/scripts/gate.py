@@ -1490,6 +1490,8 @@ def check_mutation(g: Gate, r: Result) -> None:
         command = override or (
             f"npx --no-install stryker run --mutate {shlex.quote(','.join(glob_literal(f) for f in files))} "
             f"--reporters json,clear-text,progress --incremental --incrementalFile {shlex.quote(str(incremental))}")
+        if g.unit_test_files_without_flaky and not override:
+            command += f" --testFiles {shlex.quote(','.join(g.unit_test_files_without_flaky))}"
         code = g.run("mutation", command)
     else:
         if not g.has_tool("mutmut"):
