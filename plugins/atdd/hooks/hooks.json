@@ -20,6 +20,15 @@
         "hooks": [
           {
             "type": "command",
+            "command": "python3",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/scripts/atdd_guard.py",
+              "wait"
+            ],
+            "timeout": 30
+          },
+          {
+            "type": "command",
             "if": "Bash(git *)",
             "command": "python3",
             "args": [

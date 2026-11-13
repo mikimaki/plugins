@@ -23,7 +23,7 @@ Read `.claude/atdd.json`:
 Procedure:
 
 1. **Start the app** with `commands.qaUp`. It should return once the app is starting. Don't run a foreground server in your own shell: it would block you.
-2. **Poll the health URL** for up to about 2 minutes before declaring the app broken, or about 6 minutes when `qa-up` builds the app first (`qa.notes` says so; a Next.js app does). If it doesn't come up, that's a **blocker**. Report it with the last 50 lines of the app log (`qa-up` writes it to `.atdd/qa/app.log` unless `qa.notes` says otherwise).
+2. **Poll the health URL in the background** for up to about 2 minutes before declaring the app broken, or about 6 minutes when `qa-up` builds the app first (`qa.notes` says so; a Next.js app does). Start the polling loop with `run_in_background` (for example `until curl -sf "$HEALTH_URL" >/dev/null; do sleep 2; done; echo ready`) and monitor its output until it prints `ready` or the time is up. Never poll in a foreground loop: a guard refuses foreground shell loops with `sleep`, single `sleep`s over 30 seconds and foreground timeouts over 2 minutes. If the app doesn't come up, that's a **blocker**. Report it with the last 50 lines of the app log (`qa-up` writes it to `.atdd/qa/app.log` unless `qa.notes` says otherwise).
 3. **Always run `commands.qaDown` at the end**, also after failures. Stop anything else you started.
 
 ## 2. Replay every scenario by hand

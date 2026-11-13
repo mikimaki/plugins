@@ -201,6 +201,7 @@ claude -p "/atdd:cover-queue claude/inventory a01-accounts a03-catalogue --max-u
 | reviewers, qa, quality-tester, coverage agents, preparer | Write only under `.atdd/` |
 | preparer | Commits only the feature directory and, when parking a unit, the test paths. Creates branches, brings files in from a ref only into `featuresDir`, sets only `branch.*.atdd*` git config. Pushes only unit branches the queue created (`branch.<name>.atddBase` set), never the base or integration branch, never with force, deletes or tags. Rebases only a unit branch that was never pushed |
 | read-only agents | Only read-only git commands |
+| qa | No foreground waits: a Bash timeout over 2 minutes, a shell loop with `sleep` or a single `sleep` over 30 seconds is refused unless run in the background |
 | every atdd agent | Only read-only `gh` commands; the preparer may also `gh pr create` for a unit branch |
 
 ## The quality gate in one paragraph
