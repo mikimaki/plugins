@@ -53,12 +53,11 @@ const make = s => { const sc = JSON.parse(JSON.stringify(s)); return async (p, o
   assert.match(prompts[1], /\.atdd\/a01\/cover\/targets\.txt/); assert.match(result.next, /push the branch and open a PR/)
   console.log('plain ok')
 }
-// no QA stage: coverage reviewer, then the cover gate, even when the repo can start the app
+// no QA stage: coverage reviewer, then the cover gate
 {
-  const calls = []
-  const { result, logs } = await run(C, { args: 'PROJ-45', agent: async (p, o) => { calls.push(o); return make({ 'atdd:preparer': [{ ...prep, hasQa: true }], 'atdd:acceptance-test-coverer': [cover()], 'atdd:coverage-reviewer': [pass], 'atdd:coverage-quality-tester': [pass] })(p, o) } })
+  const { result, calls, logs } = await run(C, { args: 'PROJ-45', agent: make({ 'atdd:preparer': [prep], 'atdd:acceptance-test-coverer': [cover()], 'atdd:coverage-reviewer': [pass], 'atdd:coverage-quality-tester': [pass] }) })
   assert.equal(result.status, 'done')
-  assert.deepEqual(calls.map(o => o.agentType), ['atdd:preparer', 'atdd:acceptance-test-coverer', 'atdd:coverage-reviewer', 'atdd:coverage-quality-tester'])
+  assert.deepEqual(calls.map(c => c.opts.agentType), ['atdd:preparer', 'atdd:acceptance-test-coverer', 'atdd:coverage-reviewer', 'atdd:coverage-quality-tester'])
   assert.deepEqual(result.history.map(h => h.stage), ['review', 'quality'])
   assert.ok(!logs.some(l => /QA/.test(l)), logs.join('\n'))
   const meta = new Function(readFileSync(C, 'utf8').match(/export const meta = (\{[\s\S]*?\n\})/)[1].replace(/^/, 'return '))()

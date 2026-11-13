@@ -83,10 +83,14 @@ def git(repo: Path, *args: str) -> str:
     return subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True).stdout
 
 
-def write(repo: Path, path: str, text: str, append: bool = False) -> None:
+def write(repo: Path, path: str, text: str) -> None:
     file = repo / path
     file.parent.mkdir(parents=True, exist_ok=True)
-    with file.open("a" if append else "w", encoding="utf-8") as handle:
+    file.write_text(text, encoding="utf-8")
+
+
+def append(repo: Path, path: str, text: str) -> None:
+    with (repo / path).open("a", encoding="utf-8") as handle:
         handle.write(text)
 
 
@@ -105,12 +109,12 @@ def build(target: Path) -> Path:
     git(target, "init", "-q", "-b", "main")
     git(target, "config", "user.email", "fixture@example.com")
     git(target, "config", "user.name", "fixture")
-    write(target, "pyproject.toml", IMPORT_CONTRACT, append=True)
+    append(target, "pyproject.toml", IMPORT_CONTRACT)
     write(target, "features/goals/goals.feature", FEATURE)
     write(target, "tests/acceptance/test_goal_scenarios.py", ACCEPTANCE)
     commit(target, "Stride with its approved goal scenario")
     git(target, "switch", "-q", "-c", "feature")
-    write(target, "src/stepgoals/goals.py", CLEAR_GOAL, append=True)
+    append(target, "src/stepgoals/goals.py", CLEAR_GOAL)
     write(target, "tests/unit/test_clear_goal.py", CLEAR_GOAL_TEST)
     commit(target, "Members can clear their goal")
     return target

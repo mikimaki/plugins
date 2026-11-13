@@ -33,7 +33,8 @@ IMPLEMENTER = "atdd:implementer"
 COVERER = "atdd:acceptance-test-coverer"
 PREPARER = "atdd:preparer"
 GHERKIN_WRITER = "atdd:gherkin-writer"
-READ_ONLY = {"atdd:gherkin-reviewer", "atdd:reviewer", "atdd:qa", "atdd:quality-tester", GHERKIN_WRITER,
+QA = "atdd:qa"
+READ_ONLY = {"atdd:gherkin-reviewer", "atdd:reviewer", QA, "atdd:quality-tester", GHERKIN_WRITER,
              "atdd:coverage-reviewer", "atdd:coverage-quality-tester"}
 COMMITTERS = {IMPLEMENTER: "the implementer", COVERER: "the acceptance-test-coverer"}
 DEFAULT_COVER_FAST_CHECKS = "python3 scripts/atdd/gate.py cover-fast"
@@ -514,12 +515,11 @@ def check_gh(agent: str, data: dict, root: Path, config: dict) -> int:
     return allow()
 
 
-QA = "atdd:qa"
 MAX_FOREGROUND_TIMEOUT_MS = 120000
 MAX_FOREGROUND_SLEEP_SECONDS = 30
 SLEEP_UNIT_SECONDS = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
-SHELL_LOOP = re.compile(r"(?:^|[\s;&|({])(?:until|while|for)\s")
-SLEEP = re.compile(r"(?:^|[\s;&|({])sleep(?:\s+([0-9.]+)([smhd]?))?")
+SHELL_LOOP = re.compile(r"(?:^|[;&|({`\n\"'])\s*(?:until|while|for)\s")
+SLEEP = re.compile(r"(?:^|[\s;&|({`])sleep(?:\s+([0-9.]+|inf(?:inity)?)([smhd]?))?")
 WAIT_GUIDANCE = (
     "QA doesn't wait in the foreground for more than 2 minutes of real time. Instead: run the command in the background "
     "(run_in_background) and monitor its output; use the app's test clock if qa.notes names one; or skip the scenario "
