@@ -4,6 +4,8 @@ eval: `main` holds the app, one approved .feature file bound by an acceptance te
 
     repo = build(target)                  # target is created or replaced
     report = run_gate(repo, "fast")       # report.json as a dict; extra args go to gate.py
+    add_to_base(repo, path, text)         # a file committed on main, under the feature branch
+    add_to_feature(repo, path, text)      # a file committed on the feature branch
 """
 import json
 import os
@@ -118,6 +120,19 @@ def build(target: Path) -> Path:
     write(target, "tests/unit/test_clear_goal.py", CLEAR_GOAL_TEST)
     commit(target, "Members can clear their goal")
     return target
+
+
+def add_to_base(repo: Path, path: str, text: str) -> None:
+    git(repo, "switch", "-q", "main")
+    write(repo, path, text)
+    commit(repo, f"Add {path}")
+    git(repo, "switch", "-q", "feature")
+    git(repo, "rebase", "-q", "main")
+
+
+def add_to_feature(repo: Path, path: str, text: str) -> None:
+    write(repo, path, text)
+    commit(repo, f"Add {path}")
 
 
 def configure_gate(repo: Path, **settings) -> None:

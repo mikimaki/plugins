@@ -60,7 +60,7 @@ The TypeScript column covers Next.js too; where Next.js differs, the cell says s
 | `build` | compiles; analyzer warnings | `dotnet build` + Roslyn/Sonar analyzers | `tsc --noEmit` (Next.js with Prisma: `prisma generate` first) | `compileall` | build error, or any warning in changed code |
 | `format` | formatting | `dotnet format whitespace` | Prettier | `ruff format` | a changed file isn't formatted |
 | `lint` | linter rules | (analyzers in `build`) | repo ESLint | `ruff check` | a problem on an added line |
-| `tests` | all tests pass (+ coverage in `full`) | `dotnet test` (+ coverlet, JSON and Cobertura) | unit + acceptance (+ V8 coverage merged by `coverage.mjs`; Next.js: Vitest, the Next.js server and Chromium) | `pytest` (+ pytest-cov with branches) | any test fails |
+| `tests` | all tests pass (+ coverage in `full`) | `dotnet test` (+ coverlet, JSON and Cobertura) | unit + acceptance (+ V8 coverage merged by `coverage.mjs`; Next.js: Vitest, the Next.js server and Chromium) | `pytest` (+ pytest-cov with branches) | any test fails, unless every failure is a flaky test (Python): then `flaky`, which doesn't fail the gate |
 | `undefined-steps` | every Gherkin step bound exactly once | Reqnroll `missingOrPendingStepsOutcome: Error` | cucumber dry run / `bddgen` (Next.js: `bddgen`) | `scenarios()` binds all | undefined, ambiguous or unbound steps |
 | `complexity` | cyclomatic complexity, function length, parameters | lizard | lizard | lizard | a changed function exceeds a limit |
 | `cognitive` | cognitive complexity | Sonar S3776 (in `build`) | sonarjs via `eslint.quality.mjs` | complexipy | a changed function exceeds the limit |
@@ -74,6 +74,13 @@ The TypeScript column covers Next.js too; where Next.js differs, the cell says s
 | `vulnerabilities` | known-vulnerable packages | `dotnet package list --vulnerable` | `npm audit` (Next.js with `pnpm-lock.yaml`: `pnpm audit`) | `pip-audit` | vulnerable **and** this change touched dependency manifests; otherwise `warn` |
 | `suppressions` | new pragmas, ignores, skips | `#pragma warning disable`, `[ExcludeFromCodeCoverage]`, `Skip =`, … | `eslint-disable`, `@ts-ignore`, `.skip(`, `.only(`, `v8 ignore`, … (Next.js also `.fixme(`, `test.fail(`, `.todo(`) | `# noqa`, `# type: ignore`, `pytest.mark.skip`, … | any new one |
 | `locked-files` | scenarios, ledger, gate scripts and threshold configs untouched | `lockedPaths` | `lockedPaths` | `lockedPaths` | any changed after `ATDD_SCENARIOS_COMMIT` |
+
+**Flaky tests (Python).** When pytest fails, the gate classifies each failing test from its JUnit report, without re-running anything. The test's module comes from the JUnit classname (pytest-bdd reports its own `scenario.py` as the file). A failing test is **flaky** when both hold:
+
+- its test side exists unchanged on the base commit: the test module, every `conftest.py` above it, every test-side module (helpers, step modules, `pytest_plugins`) those files import directly or transitively, and every `.feature` file their `scenarios()` and `scenario()` calls bind (resolved against `bdd_features_base_dir`; a feature named by anything but a string literal binds every changed `.feature` file);
+- nothing on that test side imports, through the Python import graph, a production file of `sourceDirs` this branch changed.
+
+Every other failure stays a failure, in every mode, cover modes included. A file the import walk needs but can't read or parse makes the failure a plain one, and the detail names the file. When every failure is flaky, the `tests` check reports `flaky`: the gate passes, and the detail names each test and why it qualified. In `full` mode, coverage is measured in a second pytest run that deselects the flaky tests (if that run fails, `tests` fails), and mutmut runs with them deselected too (`PYTEST_ADDOPTS=--deselect …`); `diff-coverage` and `mutation` name the excluded tests in their detail. Fast mode classifies the same way, so the commit hook doesn't refuse a commit for a flaky test. The gate never quarantines or skips a test outside its own run. The rule assumes the base is green: a test that is always broken on the base surfaces as `flaky` on every branch that doesn't touch its code, until a human fixes it. Other stacks don't classify yet; any failure is `fail`.
 
 **Default thresholds** live in `gate.thresholds`:
 
@@ -197,7 +204,7 @@ Overrides: `gate.commands.acceptanceCoverage` with `gate.acceptanceCoverageRepor
 
 | File in `<out>/` | Contents |
 |---|---|
-| `report.json` | `passed`, `base`, `head`, `changedFiles`, `thresholds`, and `checks[]` with `{name, status, metric, threshold, detail, log, seconds}`. `status` is `pass`, `fail`, `warn` or `skipped` |
+| `report.json` | `passed`, `base`, `head`, `changedFiles`, `thresholds`, and `checks[]` with `{name, status, metric, threshold, detail, log, seconds}`. `status` is `pass`, `fail`, `flaky` (tests only), `warn` or `skipped` |
 | `logs/<check>.log` | full tool output, starting with the exact command |
 | `build-warnings.txt` | .NET warnings in changed code |
 | `dependency-cycles.json` | every cycle: `kind` (namespace or project), `members`, the shortest `cycle`, the `evidence` for each hop, and `touchedByThisChange` |
@@ -235,6 +242,7 @@ The implementer gets your findings, not the logs. Write each one so it can be fi
 - **suppressions.** Quote the line. The fix is the underlying problem, never the suppression.
 - **locked-files.** List the files. They must be reverted. If the implementer believes one is wrong, that's a question for a human.
 - **undefined-steps / tests.** Name the failing scenario or test and quote the first assertion message.
+- **A `flaky` on tests** is a minor, advisory finding, never a blocker and never the implementer's to fix: name each flaky test and quote the reason from the detail, so a human can fix it in a change of its own.
 - **A `warn` on vulnerabilities**, or a `skipped` because rules aren't configured, is a minor finding addressed to a human, not to the implementer.
 - **production-untouched** (cover mode). List the files. They must be reverted, or deleted if the change created them; a change outside the test paths is never the coverer's to make.
 - **duplicate-steps** (cover mode). Name the step text and every definition the log lists. Say which one stays (usually the older, or the one in the shared place for steps) and that the other goes, with its callers reusing the one that stays.
