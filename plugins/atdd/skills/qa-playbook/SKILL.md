@@ -185,7 +185,7 @@ When the prompt names the commit you last tested, sections 2 and 3 shrink to thr
 1. **Re-test every earlier finding by hand** first, rerunning its evidence.
 2. **Replay all saved scripts** with the replay command in section 2. Fixes often break neighbors. Hand-test only the scenarios that have no script, following the steps in last round's `scenarios.md`. Save fresh replay scripts as in section 2.
 
-   A scenario skipped earlier for an idle wait also has no script, but don't hand-test it: that would need the same wait. It stays skipped. Record it again in `scenarios.md` and in `skipped` with the same reason.
+   A scenario skipped earlier for an idle wait also has no script, but don't hand-test it: that would need the same wait. It stays skipped. Record it again in `scenarios.md` and in `skipped` with its reason, updated if you now know more (for example, the wait length).
 3. **Explore only around** `git diff <last tested>..<commit under test>` and what it affects, with section 3's heuristics.
 
 - A replay failure of a scenario that passed before is a **blocker**. Attach the replay output as evidence.
