@@ -1,6 +1,6 @@
 # atdd: a Gherkin-first ATDD pipeline for Claude Code
 
-Turns a spec from your issue tracker into reviewed Gherkin, then into an implementation. The implementation must survive a code reviewer, a manual QA pass and a brutal deterministic quality gate. Each failed check sends the work back to the implementer.
+Turns a spec from your issue tracker into reviewed Gherkin, then into an implementation. The implementation must survive a code reviewer, a brutal deterministic quality gate and a manual QA pass. Each failed check sends the work back to the implementer.
 
 For behavior the code already has, `/atdd:cover` turns the same reviewed Gherkin into acceptance tests instead, and changes nothing else. That's the way into a platform that has no acceptance tests yet: cover what it does first, then refactor with the tests as a safety net. `/atdd:cover-queue` does that for a whole inventory of Gherkin, unattended, one `.feature` file and one PR at a time.
 
@@ -16,7 +16,7 @@ Matt Pocock's skills (you)            this plugin
                                    /atdd:build <issue>
                                       preparer      commit the scenarios, record the base
                                       implementer   step definitions + code → commit (commit hook runs the fast gate)
-                                      → reviewer → qa → quality-tester    (fail-fast, ≤ 5 rounds)
+                                      → reviewer → quality-tester → qa    (fail-fast, ≤ 5 rounds)
                                       any blocker/major finding → implementer, then restart at reviewer
 
                                    or, when the code already does what the scenarios say:
@@ -25,7 +25,7 @@ Matt Pocock's skills (you)            this plugin
                                       preparer      commit the scenarios, check the branch changes only tests
                                       acceptance-test-coverer   step definitions against the existing code → commit
                                                     (commit hook: only test paths changed, then the cover fast gate)
-                                      → coverage-reviewer → coverage-qa → coverage-quality-tester   (≤ 5 rounds)
+                                      → coverage-reviewer → coverage-quality-tester   (≤ 5 rounds)
                                       any blocker/major finding → coverer; a scenario the code contradicts → you
 
                                    or, for many areas of Gherkin already on a branch:
@@ -69,7 +69,7 @@ To try changes without installing, run `claude --plugin-dir ~/personal-skills/pl
    You get an approved ledger and scenarios in `<featuresDir>/<key>/`, uncommitted, on branch `atdd/<key>`. Read them. Edit anything you disagree with. If the ledger lists open questions, answer them in the spec and re-run.
 4. **Run `/atdd:build PROJ-45`.** It ends either `done` on a commit that passed every check, or `needs-human` with the outstanding findings. Review the diff, push, and open the PR yourself.
 
-   **Or, if the code already does what the scenarios describe, run `/atdd:cover PROJ-45`.** It binds the scenarios to the existing code and changes nothing outside the test paths (`cover.testPaths`, else `gate.testDirs` plus `featuresDir`). A hook keeps the coverer's edits and commits there, and the reviewer, QA and the quality gate each check the whole branch again. The run ends in one of three ways:
+   **Or, if the code already does what the scenarios describe, run `/atdd:cover PROJ-45`.** It binds the scenarios to the existing code and changes nothing outside the test paths (`cover.testPaths`, else `gate.testDirs` plus `featuresDir`). A hook keeps the coverer's edits and commits there, and the coverage reviewer and the quality gate each check the whole branch again. There is no QA stage: nothing but tests changed, so there is no new behavior to replay by hand. The run ends in one of three ways:
    - `done`: the branch adds acceptance tests and nothing else. The advisory findings list behavior no scenario covers yet, which is worth adding to the spec before you refactor.
    - `discrepancies`: the code doesn't do what some scenarios say. It changes neither: you decide whether the scenario is wrong (fix the spec or the scenarios) or the code is (fix it in a change of its own on the base branch). Then re-run; the coverer picks up its uncommitted test files.
    - `needs-human`: something only you can change, such as a seam the code lacks (it reads the clock directly, say) or a missing test package. Make that change on the base branch, update this branch from it, and re-run.
@@ -99,7 +99,7 @@ origin/<baseBranch> ── atdd/cover-base ── unit 1 ── unit 3 ── un
 
 - **Integration branch.** `cover.integrationBranch` (default `atdd/cover-base`), created from `origin/<baseBranch>` when it's missing. It collects the reviewed units; your final PR takes it into the base branch.
 - **A stack of unit branches.** Unit `atdd/cover-<area>-<file>` is cut from the last unit that ended `done`, the first from the integration branch. So every unit sees every earlier unit's step definitions and reuses them instead of defining them again, and each PR, opened against its parent branch, shows exactly one unit's change. The gate judges each unit against its parent too.
-- **Per unit:** the preparer brings in the area's ledger and the one `.feature` file from the source ref (`git checkout <ref> -- <paths>`) and commits them; the spec is snapshotted into `.atdd/<area>/spec.md` and never enters the branch. Then the full `/atdd:cover` loop runs: coverer → coverage reviewer → QA → quality gate.
+- **Per unit:** the preparer brings in the area's ledger and the one `.feature` file from the source ref (`git checkout <ref> -- <paths>`) and commits them; the spec is snapshotted into `.atdd/<area>/spec.md` and never enters the branch. Then the full `/atdd:cover` loop runs: coverer → coverage reviewer → quality gate.
 - **Duplicate steps can't slip through.** The coverer searches the existing step definitions first and keeps shared steps in one place (`features/steps/common/`, the acceptance tests' `conftest.py`, a shared binding class). The gate's `duplicate-steps` check fails on a step text defined twice, and the reviewer flags it.
 - **Park.** A unit that ends in discrepancies, needs a human for a reason of its own (a missing seam, a question the spec doesn't answer) or runs out of rounds is parked: its test files go into a WIP commit on its own branch, the reason is recorded, and the queue carries on from the last `done` unit with a clean tree. No work is lost.
 - **Stop.** A problem every unit would hit stops the whole queue with a reason: the gate is too old or the coverage setup is missing, the app doesn't start, a tool is missing, the tree isn't clean. So does `cover.maxConsecutiveParks` (default 3) units parked in a row.
@@ -170,7 +170,6 @@ claude -p "/atdd:cover-queue claude/inventory a01-accounts a03-catalogue --max-u
 | `quality-tester` | Runs `gate.py full` and turns every failed check into an actionable finding |
 | `acceptance-test-coverer` | `/atdd:cover`: binds the scenarios to existing code without changing it, reports discrepancies between a scenario and the code instead of resolving them, commits, and fixes findings in the tests |
 | `coverage-reviewer` | Read-only. Judges only the tests: nothing outside the test paths changed, honest step definitions, a safety net worth trusting, the coverage targets. Never asks for production changes |
-| `coverage-qa` | Checks nothing but tests changed, then replays every scenario against the running app to prove the tests tell the truth. Doesn't hunt for bugs in the existing platform |
 | `coverage-quality-tester` | Runs `gate.py cover-full`, and decides for every coverage gap and surviving mutant whether the coverer must fix it or it's a spec gap for you |
 | `preparer` | Workflow housekeeping: config, spec snapshot, branch, commits; for `/atdd:cover-queue` also the plan, parking and publishing |
 
@@ -237,7 +236,7 @@ scripts/atdd/gate.py, qa-*.sh        gate and QA scripts, copied in by /atdd:ini
 <featuresDir>/<key>/requirements.md  ledger (locked once approved)
 <featuresDir>/<key>/*.feature        scenarios (locked once approved)
 .atdd/                               working area, git-ignored: spec snapshots, review notes, QA evidence, gate reports, logs
-.atdd/<key>/cover/                   /atdd:cover: coverage targets (targets.txt), QA evidence, gate reports
+.atdd/<key>/cover/                   /atdd:cover: coverage targets (targets.txt), gate reports
 .atdd/<key>/cover/<file>/            the same per /atdd:cover-queue unit, plus its PR body
 git config branch.<unit>.atdd*       /atdd:cover-queue's records: stack parent, verdict, parked reason, PR URL
 ```

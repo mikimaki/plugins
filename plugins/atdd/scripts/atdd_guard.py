@@ -34,7 +34,7 @@ COVERER = "atdd:acceptance-test-coverer"
 PREPARER = "atdd:preparer"
 GHERKIN_WRITER = "atdd:gherkin-writer"
 READ_ONLY = {"atdd:gherkin-reviewer", "atdd:reviewer", "atdd:qa", "atdd:quality-tester", GHERKIN_WRITER,
-             "atdd:coverage-reviewer", "atdd:coverage-qa", "atdd:coverage-quality-tester"}
+             "atdd:coverage-reviewer", "atdd:coverage-quality-tester"}
 COMMITTERS = {IMPLEMENTER: "the implementer", COVERER: "the acceptance-test-coverer"}
 DEFAULT_COVER_FAST_CHECKS = "python3 scripts/atdd/gate.py cover-fast"
 

@@ -37,7 +37,7 @@ def decide(root, mode, agent, tool_input):
     return ("deny", json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"]) if out.strip() else ("allow", "")
 
 
-COVERER, PREPARER, REVIEWER, QA = "atdd:acceptance-test-coverer", "atdd:preparer", "atdd:coverage-reviewer", "atdd:coverage-qa"
+COVERER, PREPARER, REVIEWER = "atdd:acceptance-test-coverer", "atdd:preparer", "atdd:coverage-reviewer"
 BUILD_QA = "atdd:qa"
 failures = 0
 
@@ -135,7 +135,7 @@ with tempfile.TemporaryDirectory() as tmp:
     E("deny", "gh", PREPARER, "gh pr merge 12 --merge", "preparer merges a PR")
     E("deny", "gh", PREPARER, "gh api -X POST repos/o/r/pulls -f title=x", "preparer writes through gh api")
     E("deny", "gh", COVERER, f"gh pr create --base {PARENT} --head {UNIT} --title t --body x", "coverer opens a PR")
-    E("deny", "gh", QA, "gh pr comment 12 --body hi", "QA comments on a PR")
+    E("deny", "gh", "atdd:qa", "gh pr comment 12 --body hi", "QA comments on a PR")
     E("allow", "gh", REVIEWER, "gh pr view 12", "reviewer reads a PR")
     E("allow", "gh", PREPARER, "gh pr list --head atdd/cover-a01-x --json url", "preparer lists PRs")
     E("allow", "gh", PREPARER, "gh auth status", "preparer checks gh auth")

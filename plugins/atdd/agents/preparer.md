@@ -98,8 +98,7 @@ Be precise and literal. Every later agent in the pipeline relies on the paths an
    - `ok`, `key`, `title`, `specPath`, `featureDir`, `branch`, `scenariosCommit`, `base`, `baseNote`;
    - `testPaths`: the globs from step 3;
    - `unfinishedWork`: the paths from step 5, or an empty list;
-   - `maxRounds`: `limits.coverRounds`, default 5;
-   - `hasQa`: true if `commands.qaUp` is set.
+   - `maxRounds`: `limits.coverRounds`, default 5.
    - When you stop, `failureScope`: `repo` for a problem every run in this repo would hit (no config, no test paths, the gate or the coverage setup is missing, a dirty working tree), `unit` for one that concerns only these scenarios.
 
 ## Cover mode, one unit

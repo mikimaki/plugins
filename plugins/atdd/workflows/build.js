@@ -1,13 +1,13 @@
 export const meta = {
   name: 'build',
-  description: 'Implement approved Gherkin scenarios (ATDD), then run reviewer → QA → quality gate, sending blocking findings back to the implementer until all three pass',
+  description: 'Implement approved Gherkin scenarios (ATDD), then run reviewer → quality gate → QA, sending blocking findings back to the implementer until all three pass',
   whenToUse: 'After /atdd:gherkin produced approved scenarios and you have read them. Pass the same issue reference as args, e.g. "PROJ-45".',
   phases: [
     { title: 'Prepare', detail: 'check the scenarios and commit them' },
     { title: 'Implement', detail: 'implementer: step definitions + code, then commit' },
     { title: 'Review', detail: 'reviewer: architecture, standards, honest step definitions' },
-    { title: 'QA', detail: 'qa: run the app and test every scenario by hand' },
     { title: 'Quality', detail: 'quality-tester: mutation, complexity, coverage and more' },
+    { title: 'QA', detail: 'qa: run the app and test every scenario by hand' },
   ],
 }
 
@@ -108,8 +108,8 @@ const CHECK = {
 
 const STAGES = [
   { key: 'review', phase: 'Review', agentType: 'atdd:reviewer', name: 'reviewer' },
-  { key: 'qa', phase: 'QA', agentType: 'atdd:qa', name: 'QA' },
   { key: 'quality', phase: 'Quality', agentType: 'atdd:quality-tester', name: 'quality gate' },
+  { key: 'qa', phase: 'QA', agentType: 'atdd:qa', name: 'QA' },
 ]
 
 const isBlocking = f => f.severity === 'blocker' || f.severity === 'major'
