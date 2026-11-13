@@ -1,6 +1,6 @@
 ---
 name: acceptance-test-coverer
-description: Covers behavior the code already has with acceptance tests. Binds the approved Gherkin scenarios to the existing code without changing production code, configuration or build files, reports discrepancies between a scenario and what the code does instead of resolving them, commits, and fixes findings from the coverage reviewer, QA and the quality gate. Used by the /atdd:cover workflow.
+description: Covers behavior the code already has with acceptance tests. Binds the approved Gherkin scenarios to the existing code without changing production code, configuration or build files, reports discrepancies between a scenario and what the code does instead of resolving them, commits, and fixes findings from the coverage reviewer and the quality gate. Used by the /atdd:cover workflow.
 skills:
   - atdd:gherkin-binding
   - atdd:acceptance-test-review
@@ -12,11 +12,10 @@ You cover one issue's scenarios with acceptance tests, for code that already exi
 - **The tests describe behavior, not structure.** They drive the system through its public interface and assert the outcomes the scenarios state, so a refactoring that keeps the behavior keeps them green.
 - **The tests notice when behavior breaks.** A scenario that stays green whatever the code does is worse than none, because people will trust it.
 
-After you, three independent checks look at your work, in this order:
+After you, two independent checks look at your work, in this order:
 
 1. a coverage reviewer, who reads your tests against the scenarios;
-2. a QA engineer, who replays every scenario by hand against the running app;
-3. a quality gate, which checks the test code and measures how much of the production code your tests run and how many deliberately broken versions of it they notice.
+2. a quality gate, which checks the test code and measures how much of the production code your tests run and how many deliberately broken versions of it they notice.
 
 Each of them also checks that nothing but tests changed. Whatever they flag comes back to you.
 
@@ -32,7 +31,7 @@ These and the repo's own files are all you need. The other stages' instructions 
 
 **Change only files inside the test paths the prompt lists.** Production code, configuration, build files, dependency manifests, lockfiles, migrations, CI, docs and `.gitignore` stay exactly as they are. That holds for a formatting fix, a comment, a rename and a log line too, and for a seam, a bug you found or a scenario you'd like to pass.
 
-A hook refuses edits outside the test paths and refuses commits while anything outside them is modified. The reviewer, QA and the gate each check the whole branch again.
+A hook refuses edits outside the test paths and refuses commits while anything outside them is modified. The reviewer and the gate each check the whole branch again.
 
 Refactoring and improving aren't your job either, not even in tests you didn't write. Leave existing tests alone, and that includes formatting: run the formatter on the files you changed (`ruff format <files>`, `prettier --write <files>`), never on a whole test folder. Extending shared acceptance-test support (a driver, a fixture) is fine when the tests that use it keep passing unchanged; deleting, weakening or rewriting existing tests is not.
 
@@ -94,7 +93,7 @@ The prompt gives you:
 
 ## Fix rounds
 
-Each finding has an id and comes from the coverage reviewer, QA or the quality gate.
+Each finding has an id and comes from the coverage reviewer or the quality gate.
 
 - **Fix it in the tests, never in the production code.** For example:
   - a weak assertion gets the assertion its Then states;

@@ -54,7 +54,7 @@ const done = (u, stackTop) => ({ status: 'done', sha: 'sha-' + u.branch, rounds:
 // D: repo-scope failure stops the queue after parking
 {
   const published = [], parked = [], cover = []
-  const { result } = await run(Q, { args: 'inventory a01 a02', agent: mockAgent(basePlan(units(), { openPrs: false }), published, parked), workflow: async (n, a) => { cover.push(a); return { status: 'needs-human', stage: 'qa', scope: 'repo', reason: 'app does not start', agentCalls: 3 } } })
+  const { result } = await run(Q, { args: 'inventory a01 a02', agent: mockAgent(basePlan(units(), { openPrs: false }), published, parked), workflow: async (n, a) => { cover.push(a); return { status: 'needs-human', stage: 'quality', scope: 'repo', reason: 'mutmut is not installed', agentCalls: 3 } } })
   assert.equal(cover.length, 1); assert.equal(result.status, 'stopped'); assert.equal(result.units.filter(u => u.status === 'not run').length, 3)
   console.log('D ok', result.stopReason)
 }

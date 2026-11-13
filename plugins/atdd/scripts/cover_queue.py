@@ -337,7 +337,6 @@ def plan(args) -> dict:
         "testPaths": test_paths,
         "maxConsecutiveParks": int(cover.get("maxConsecutiveParks") or 3),
         "maxRounds": int((config.get("limits") or {}).get("coverRounds") or 5),
-        "hasQa": bool(commands.get("qaUp")),
         "top": top,
         "doneUnmerged": done,
         "pluginRoot": str(HERE.parent),
