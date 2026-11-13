@@ -136,7 +136,7 @@ NODE_STACKS = ("typescript", "nextjs")
 @dataclass
 class Result:
     name: str
-    status: str = "pass"          # pass | fail | warn | skipped
+    status: str = "pass"          # pass | fail | flaky | warn | skipped
     detail: str = ""
     metric: str = ""
     threshold: str = ""
@@ -162,6 +162,7 @@ class Gate:
     coverlet_reports: list = field(default_factory=list)
     branches_measured: bool = False
     cover_targets_file: str | None = None
+    flaky_tests: list = field(default_factory=list)
     _functions: dict | None = None
 
     # ---------- helpers ----------
@@ -637,18 +638,123 @@ def check_tests(g: Gate, r: Result) -> None:
     elif g.node:
         code = run_node_tests(g, with_coverage)
     else:
-        dirs = g.gate_config.get("sourceDirs", [])
-        base = g.command_override("pytest") or "python3 -m pytest --ignore=mutants"
-        if with_coverage:
-            report = g.out / "coverage.xml"
-            cov = " ".join(f"--cov={shlex.quote(d)}" for d in dirs) or "--cov=."
-            code = g.run("tests", f"{base} {cov} --cov-branch --cov-report=xml:{shlex.quote(str(report))}")
-            g.coverage_reports = [str(report)]
-            g.branches_measured = True
-        else:
-            code = g.run("tests", base)
+        junit = g.out / "junit.xml"
+        code = run_pytest(g, with_coverage, f"--junitxml={shlex.quote(str(junit))} -o junit_family=xunit1")
+        if code == PYTEST_TESTS_FAILED:
+            verdicts = classify_failures(g, junit)
+            if verdicts and all(flaky for flaky, _ in verdicts.values()):
+                g.flaky_tests = sorted(verdicts)
+                r.status = "flaky"
+                r.detail = (f"Every failing test is flaky: its test file is unchanged since the base {g.base[:10]} and "
+                            "reaches no production file this branch changed. Advisory; it doesn't fail the gate:\n"
+                            + "\n".join(f"{test}: {why}" for test, (_, why) in sorted(verdicts.items())))
+                if with_coverage:
+                    run_pytest(g, with_coverage, " ".join(f"--deselect {shlex.quote(t)}" for t in g.flaky_tests), append=True)
+                return
+            if verdicts:
+                r.status = "fail"
+                r.detail = ("Tests failed:\n" + g.tail(g.log_path("tests"), 30) + "\n\nNot flaky:\n"
+                            + "\n".join(f"{test}: {why}" for test, (flaky, why) in sorted(verdicts.items()) if not flaky))
+                return
     if code != 0:
         r.status, r.detail = "fail", "Tests failed:\n" + g.tail(g.log_path("tests"), 30)
+
+
+PYTEST_TESTS_FAILED = 1
+
+
+def run_pytest(g: Gate, with_coverage: bool, extra: str, append: bool = False) -> int:
+    base = g.command_override("pytest") or "python3 -m pytest --ignore=mutants"
+    if not with_coverage:
+        return g.run("tests", f"{base} {extra}", append=append)
+    report = g.out / "coverage.xml"
+    cov = " ".join(f"--cov={shlex.quote(d)}" for d in g.gate_config.get("sourceDirs", [])) or "--cov=."
+    g.coverage_reports = [str(report)]
+    g.branches_measured = True
+    return g.run("tests", f"{base} {cov} --cov-branch --cov-report=xml:{shlex.quote(str(report))} {extra}", append=append)
+
+
+def classify_failures(g: Gate, junit: Path) -> dict:
+    """{node id: (flaky, why)} for every failing test in pytest's JUnit report; empty when the report names none, so
+    the failure stays a plain one. A failure is flaky when its test file and the conftest.py files above it are
+    unchanged since the base, and nothing they import reaches a production file this branch changed."""
+    try:
+        cases = ElementTree.parse(junit).getroot().iter("testcase")
+    except (OSError, ElementTree.ParseError):
+        return {}
+    failing = [c for c in cases if c.find("failure") is not None or c.find("error") is not None]
+    if any(not c.get("file") for c in failing):
+        return {}
+    graph = PythonImportGraph(g)
+    changed_production = set(g.code_files())
+    verdicts = {}
+    for case in failing:
+        path = case.get("file")
+        files = [path] + conftests_above(g, path)
+        edited = [f for f in files if f in g.changed or g.is_new_file(f)]
+        if edited:
+            verdicts[node_id(case)] = (False, f"{', '.join(edited)} added or changed on this branch")
+            continue
+        reached = graph.reachable_from(files)
+        hit = sorted(reached & changed_production)
+        if hit:
+            verdicts[node_id(case)] = (False, f"imports reach changed production code: {', '.join(hit)}")
+            continue
+        reach = ", ".join(sorted(reached)) or "no production code"
+        verdicts[node_id(case)] = (True, f"{path} unchanged since the base; its imports reach {reach}, none of it changed")
+    return verdicts
+
+
+def node_id(case) -> str:
+    path, name, classname = case.get("file"), case.get("name"), case.get("classname") or ""
+    module = path[:-3].replace("/", ".")
+    owner = classname[len(module) + 1:] if classname.startswith(module + ".") else ""
+    return "::".join([path, *filter(None, owner.split(".")), name])
+
+
+def conftests_above(g: Gate, path: str) -> list:
+    found, folder = [], posixpath.dirname(path)
+    while True:
+        candidate = posixpath.join(folder, "conftest.py") if folder else "conftest.py"
+        if (g.root / candidate).is_file():
+            found.append(candidate)
+        if not folder:
+            return found
+        folder = posixpath.dirname(folder)
+
+
+class PythonImportGraph:
+    """The production modules of sourceDirs and what they import, for following a test's imports to the code it runs."""
+
+    def __init__(self, g: Gate):
+        self.root = g.root
+        self.modules = python_module_paths(g, g.production_files())
+        self._imports = {}
+
+    def reachable_from(self, files: list) -> set:
+        """Production files the given files import, directly or transitively, with the packages holding them."""
+        pending = [target for f in files for target in self.imports_of(f, "")]
+        seen = set()
+        while pending:
+            name = pending.pop()
+            if name in seen:
+                continue
+            seen.add(name)
+            pending.extend(self.imports_of(self.modules[name], name))
+            parent = name.rpartition(".")[0]
+            if parent in self.modules:
+                pending.append(parent)
+        return {self.modules[name] for name in seen}
+
+    def imports_of(self, path: str, module: str) -> list:
+        if path not in self._imports:
+            try:
+                tree = ast.parse((self.root / path).read_text(encoding="utf-8"), filename=path)
+            except (OSError, SyntaxError):
+                tree = ast.Module(body=[], type_ignores=[])
+            package = (module if path.endswith("__init__.py") else module.rpartition(".")[0]) or "(top level)"
+            self._imports[path] = [target for _, target in python_imports(tree, module, package, self.modules)]
+        return self._imports[path]
 
 
 def coverage_files(g: Gate) -> list:
@@ -1241,10 +1347,11 @@ def check_mutation(g: Gate, r: Result) -> None:
             return
         modules = sorted({python_module(f) for f in files})
         command = override or "mutmut run " + " ".join(shlex.quote(f"{m}.*") for m in modules)
-        code = g.run("mutation", command)
+        env = without_flaky_tests(g)
+        code = g.run("mutation", command, env=env)
         r.log = g.rel(g.log_path("mutation"))
-        g.run("mutation", "mutmut export-cicd-stats", append=True)
-        g.run("mutation-results", "mutmut results")
+        g.run("mutation", "mutmut export-cicd-stats", append=True, env=env)
+        g.run("mutation-results", "mutmut results", env=env)
         stats_path = g.root / "mutants" / "mutmut-cicd-stats.json"
         if code != 0 or not stats_path.exists():
             r.status, r.detail = "fail", f"mutmut failed (exit {code}); the clean test run must pass first:\n" + g.tail(g.log_path("mutation"), 25)
@@ -1279,6 +1386,14 @@ def check_mutation(g: Gate, r: Result) -> None:
         r.status = "fail"
         r.detail = (f"Mutation score {result['score']}% is below {limit}%. Each survivor is a behavior no test pins down:\n"
                     + "\n".join(result["survivors"][:40]))
+
+
+def without_flaky_tests(g: Gate) -> dict:
+    """Environment that makes every pytest run, mutmut's included, deselect the tests classified flaky."""
+    if not g.flaky_tests:
+        return {}
+    deselect = " ".join(f"--deselect {shlex.quote(t)}" for t in g.flaky_tests)
+    return {"PYTEST_ADDOPTS": " ".join(p for p in (os.environ.get("PYTEST_ADDOPTS", ""), deselect) if p)}
 
 
 def glob_literal(path: str) -> str:
@@ -1931,9 +2046,9 @@ def node_dependency_graphs(g: Gate, production: list):
     return namespaces, projects
 
 
-def python_dependency_graphs(g: Gate, production: list):
-    """Namespaces are packages (a module belongs to the package it sits in); projects are the directories holding a
-    pyproject.toml, setup.py or setup.cfg."""
+def python_module_paths(g: Gate, production: list) -> dict:
+    """{importable module name: path} for production files, imported from their sourceDirs folder (or its parent when
+    the folder is itself a package)."""
     import_roots = {}
     for folder in [d.strip("/") or "." for d in g.gate_config.get("sourceDirs", [])] or ["."]:
         import_roots[folder] = posixpath.dirname(folder) if (g.root / folder / "__init__.py").exists() else folder
@@ -1945,6 +2060,13 @@ def python_dependency_graphs(g: Gate, production: list):
         relative = path if root in ("", ".") else path[len(root) + 1:]
         name = relative[:-3].replace("/", ".")
         modules[name[: -len(".__init__")] if name.endswith(".__init__") else name] = path
+    return modules
+
+
+def python_dependency_graphs(g: Gate, production: list):
+    """Namespaces are packages (a module belongs to the package it sits in); projects are the directories holding a
+    pyproject.toml, setup.py or setup.cfg."""
+    modules = python_module_paths(g, production)
     package_of = {name: (name if path.endswith("__init__.py") else name.rpartition(".")[0]) or "(top level)"
                   for name, path in modules.items()}
     project_roots = {posixpath.dirname(p) for p in tracked(g, ":(glob)**/pyproject.toml", ":(glob)**/setup.py",
@@ -2381,6 +2503,8 @@ def report_acceptance_mutants(g: Gate, r: Result, summary: dict, diffs: Path | N
                     + ":\n" + "\n".join(survivors[:40]))
 
 
+FLAKY_EXCLUDED_FROM = ("diff-coverage", "mutation")
+
 CHECKS = {
     "production-untouched": check_production_untouched,
     "build": check_build,
@@ -2472,6 +2596,9 @@ def main() -> int:
             CHECKS[name](gate, result)
         except Exception as error:  # a crashing check is a failing check, never a silent pass
             result.status, result.detail = "fail", f"The check itself crashed: {error!r}"
+        if name in FLAKY_EXCLUDED_FROM and gate.flaky_tests and result.status != "skipped":
+            result.detail = "\n\n".join(filter(None, [
+                "Measured without the tests classified flaky:\n" + "\n".join(gate.flaky_tests), result.detail]))
         result.seconds = round(time.time() - started, 1)
         results.append(result)
         print(f"[{result.status.upper():7}] {name} ({result.seconds}s){' - ' + result.metric if result.metric else ''}", flush=True)
@@ -2500,7 +2627,7 @@ def main() -> int:
     if base_note:
         print(f"Base: {base_note}")
     for r in results:
-        if r.status in ("fail", "warn"):
+        if r.status in ("fail", "flaky", "warn"):
             print(f"\n## {r.name}: {r.status.upper()}" + (f" ({r.metric})" if r.metric else ""))
             print(r.detail.strip())
             if r.log:

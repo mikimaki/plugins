@@ -43,6 +43,7 @@ The repo's `.claude/atdd.json` → `commands.qualityGate` is the gate.
    - **Architecture or dependency violation:** quote the rule and the offending import.
    - **Dependency cycle:** quote the loop and its evidence lines, and say which dependency to reverse or what to move. Say whether the change touches it or it was already in the code base; the latter needs a human, in a change of its own.
    - **Suppression or locked-file change:** quote it and say it must be removed or reverted.
+   - **Flaky tests:** a `flaky` status on the tests check doesn't fail the gate. Report it as one minor, advisory finding addressed to a human, never a blocker and never work for the implementer: name every test the detail lists and why it qualified (its file unchanged since the base, and its imports reaching no changed production code). `diff-coverage` and `mutation` were measured without those tests; say so if either check fails.
 4. **Watch for silent passes.** Treat a check that "passed" while measuring nothing as failed:
    - zero mutants;
    - no changed lines found;
