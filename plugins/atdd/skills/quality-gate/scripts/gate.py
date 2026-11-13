@@ -164,6 +164,7 @@ class Gate:
     branches_measured: bool = False
     cover_targets_file: str | None = None
     flaky_tests: list = field(default_factory=list)
+    unit_test_files_without_flaky: list = field(default_factory=list)
     _functions: dict | None = None
 
     # ---------- helpers ----------
@@ -627,7 +628,7 @@ def check_tests(g: Gate, r: Result) -> None:
     elif g.stack == "dotnet":
         code = run_dotnet_tests(g, r, with_coverage)
     elif g.node:
-        code = run_node_tests(g, with_coverage)
+        code = run_node_tests(g, r, with_coverage)
     else:
         code = run_python_tests(g, r, with_coverage)
     if code != 0:
@@ -650,6 +651,13 @@ def run_python_tests(g: Gate, r: Result, with_coverage: bool) -> int:
     except GateError as error:
         r.detail = f"Can't tell whether the failures are flaky: {error}"
         return code
+    return report_failures(g, r, verdicts, code, with_coverage,
+                           lambda: run_pytest(g, with_coverage, "", append=True, env=without_flaky_tests(g)))
+
+
+def report_failures(g: Gate, r: Result, verdicts: dict, code: int, with_coverage: bool, rerun) -> int:
+    """The exit code that decides whether the tests check fails, given the verdicts on the failing tests. When every
+    failure is flaky the check reports flaky and, in full mode, rerun() measures coverage again without those tests."""
     if not verdicts:
         return code
     if not all(verdict.flaky for verdict in verdicts.values()):
@@ -662,11 +670,11 @@ def run_python_tests(g: Gate, r: Result, with_coverage: bool) -> int:
                 + describe_verdicts(verdicts, flaky=True))
     if not with_coverage:
         return 0
-    rerun = run_pytest(g, with_coverage, "", append=True, env=without_flaky_tests(g))
-    if rerun != 0:
-        r.detail = (f"The coverage run without the flaky tests failed too (exit {rerun}), so coverage can't be "
+    again = rerun()
+    if again != 0:
+        r.detail = (f"The coverage run without the flaky tests failed too (exit {again}), so coverage can't be "
                     "measured.\n\n" + r.detail)
-    return rerun
+    return again
 
 
 def run_pytest(g: Gate, with_coverage: bool, extra: str, append: bool = False, env: dict | None = None) -> int:
@@ -835,19 +843,24 @@ def classify_failures(g: Gate, junit: Path) -> dict:
         files = [path] + conftests_above(g, path)
         reached = graph.reachable_from(files)
         test_side = sorted(set(files) | (reached - graph.production_paths))
-        edited = ([f for f in test_side if f in g.changed or g.is_new_file(f)]
-                  + graph.bound_features(test_side, changed_features))
-        reached_production = sorted(reached & graph.production_paths)
-        hit = [f for f in reached_production if f in changed_production]
-        if edited:
-            verdict = Verdict(False, f"{', '.join(edited)} added or changed on this branch")
-        elif hit:
-            verdict = Verdict(False, f"imports reach changed production code: {', '.join(hit)}")
-        else:
-            reach = ", ".join(reached_production) or "no production code"
-            verdict = Verdict(True, f"{path} unchanged since the base; its imports reach {reach}, none of it changed")
-        verdicts[node_id(case, path)] = verdict
+        verdicts[node_id(case, path)] = judge_failure(g, path, test_side, sorted(reached & graph.production_paths),
+                                                      changed_production,
+                                                      graph.bound_features(test_side, changed_features))
     return verdicts
+
+
+def judge_failure(g: Gate, path: str, test_side: list, reached_production: list, changed_production: set,
+                  edited_elsewhere: list = ()) -> Verdict:
+    """Flaky when no file on the test side was added or changed on this branch and no production file the test
+    reaches was changed."""
+    edited = [f for f in test_side if f in g.changed or g.is_new_file(f)] + list(edited_elsewhere)
+    hit = [f for f in reached_production if f in changed_production]
+    if edited:
+        return Verdict(False, f"{', '.join(edited)} added or changed on this branch")
+    if hit:
+        return Verdict(False, f"imports reach changed production code: {', '.join(hit)}")
+    reach = ", ".join(reached_production) or "no production code"
+    return Verdict(True, f"{path} unchanged since the base; its imports reach {reach}, none of it changed")
 
 
 def test_module_of(g: Gate, case) -> str | None:
@@ -1591,6 +1604,8 @@ def check_mutation(g: Gate, r: Result) -> None:
         command = override or (
             f"npx --no-install stryker run --mutate {shlex.quote(','.join(glob_literal(f) for f in files))} "
             f"--reporters json,clear-text,progress --incremental --incrementalFile {shlex.quote(str(incremental))}")
+        if g.unit_test_files_without_flaky and not override:
+            command += f" --testFiles {shlex.quote(','.join(g.unit_test_files_without_flaky))}"
         code = g.run("mutation", command)
     else:
         if not g.has_tool("mutmut"):
@@ -1950,9 +1965,10 @@ class GateError(Exception):
     """A check can't measure what it should: the check fails with this message."""
 
 
-def run_node_tests(g: Gate, with_coverage: bool) -> int:
-    """Unit and acceptance tests. In full mode every place the code runs records V8 coverage under <out>/coverage
-    (see scripts/atdd/coverage.mjs), which then merges it into one Cobertura report."""
+def run_node_tests(g: Gate, r: Result, with_coverage: bool) -> int:
+    """Unit and acceptance tests, with their failures classified. In full mode every place the code runs records V8
+    coverage under <out>/coverage (see scripts/atdd/coverage.mjs), which then merges it into one Cobertura report; when
+    every failure is flaky, the tests run again without them first, so the coverage leaves them out."""
     commands = [c for c in (g.configured_command("unitTests"), g.configured_command("acceptanceTests")) if c] or ["npm test"]
     coverage = g.out / "coverage"
     merger = g.root / "scripts" / "atdd" / "coverage.mjs"
@@ -1960,18 +1976,292 @@ def run_node_tests(g: Gate, with_coverage: bool) -> int:
         g.log_path("tests").write_text("scripts/atdd/coverage.mjs is missing, so coverage can't be measured; run /atdd:init.\n",
                                        encoding="utf-8")
         return 1
-    code = 0
-    for index, command in enumerate(commands):
-        env = {"ATDD_COVERAGE_DIR": str(coverage) if with_coverage else ""}
-        if with_coverage and g.stack == "typescript" and not re.search(r"\bvitest\b", command):
-            env["NODE_V8_COVERAGE"] = str(coverage / "node-v8")
-        code = max(code, g.run("tests", command, append=index > 0, env=env))
+    runs = [NodeTestRun(command, node_runner(command), g.out / f"test-report-{index}.json")
+            for index, command in enumerate(commands)]
+    codes = run_node_commands(g, runs, with_coverage)
+    code = max(codes)
+    if code != 0:
+        try:
+            failures = [failure for run, run_code in zip(runs, codes) if run_code != 0 for failure in node_failures(g, run)]
+            verdicts = classify_node_failures(g, failures)
+        except GateError as error:
+            r.detail = f"Can't tell whether the failures are flaky: {error}"
+            failures, verdicts = [], {}
+
+        def without_flaky() -> int:
+            shutil.rmtree(coverage, ignore_errors=True)
+            return max(run_node_commands(g, runs, with_coverage, failures))
+
+        code = report_failures(g, r, verdicts, code, with_coverage, without_flaky)
+        if r.status == "flaky":
+            g.unit_test_files_without_flaky = unit_test_files_without(g, runs, failures)
     if with_coverage:
         code = max(code, g.run("tests", "node scripts/atdd/coverage.mjs merge", append=True,
                                env={"ATDD_COVERAGE_DIR": str(coverage)}))
         g.coverage_reports = [str(coverage / "merged" / "cobertura-coverage.xml")]
         g.branches_measured = True
     return code
+
+
+class NodeTestRun(NamedTuple):
+    command: str
+    runner: str | None    # vitest | jest | cucumber | playwright, from the command's last step; None for others
+    report: Path
+
+
+class NodeFailure(NamedTuple):
+    run: NodeTestRun
+    test: str             # how the gate names it: <file>::<name>
+    name: str             # the name its runner filters tests by
+    file: str             # the test file or .feature file it fails in
+    entries: tuple        # the code files it runs from, followed through the module graph
+    features: tuple       # the .feature files it runs
+
+
+NODE_RUNNERS = (("vitest", r"\bvitest\b"), ("jest", r"\bjest\b"), ("cucumber", r"\bcucumber-js\b"),
+                ("playwright", r"\bplaywright\s+test\b"))
+UNIT_RUNNERS = ("vitest", "jest")
+
+
+def node_runner(command: str) -> str | None:
+    """The test runner the command's last step starts: the gate appends its report and filter options to that step."""
+    last = re.split(r"&&|\|\||;", command)[-1]
+    return next((name for name, pattern in NODE_RUNNERS if re.search(pattern, last)), None)
+
+
+def run_node_commands(g: Gate, runs: list, with_coverage: bool, excluded: list | None = None) -> list:
+    """Each command's exit code. The first run writes every known runner's report; a rerun (excluded given, the
+    NodeFailures to leave out) appends to the log and leaves those tests out."""
+    codes = []
+    for index, run in enumerate(runs):
+        command, env = run.command, {"ATDD_COVERAGE_DIR": str(g.out / "coverage") if with_coverage else ""}
+        if with_coverage and g.stack == "typescript" and not re.search(r"\bvitest\b", run.command):
+            env["NODE_V8_COVERAGE"] = str(g.out / "coverage" / "node-v8")
+        names = [failure.name for failure in excluded or [] if failure.run == run]
+        if names:
+            command += node_exclusion(run.runner, names)
+        elif excluded is None and run.runner:
+            run.report.unlink(missing_ok=True)
+            command += node_report_option(run)
+            if run.runner == "playwright":
+                env["PLAYWRIGHT_JSON_OUTPUT_FILE"] = str(run.report)
+        codes.append(g.run("tests", command, append=excluded is not None or index > 0, env=env))
+    return codes
+
+
+def node_report_option(run: NodeTestRun) -> str:
+    report = shlex.quote(str(run.report))
+    return {"vitest": f" --reporter=default --reporter=json --outputFile.json={report}",
+            "jest": f" --json --outputFile={report}",
+            "cucumber": f" --format message:{report}",
+            "playwright": " --reporter=list,json"}[run.runner]
+
+
+def node_exclusion(runner: str, names: list) -> str:
+    """Options that make the runner leave out the tests with these names."""
+    alternatives = "|".join(re.escape(name) for name in sorted(set(names)))
+    if runner == "playwright":
+        pattern = r"(?:^|\s)(?:" + alternatives + r")(?:\s|$)"
+        return f" --grep-invert {shlex.quote(pattern)} --pass-with-no-tests"
+    option = "--name" if runner == "cucumber" else "-t"
+    return f" {option} {shlex.quote(f'^(?!(?:{alternatives})$)')}"
+
+
+def node_failures(g: Gate, run: NodeTestRun) -> list:
+    """The failing tests in a failed command's report; a GateError when it names none to tell apart."""
+    if not run.runner:
+        raise GateError(f"`{run.command}` isn't run by Vitest, Jest, Cucumber.js or Playwright, so the gate can't read "
+                        "which tests failed.")
+    try:
+        text = run.report.read_text(encoding="utf-8")
+        if run.runner == "cucumber":
+            failures = cucumber_failures(run, text)
+        elif run.runner == "playwright":
+            failures = playwright_failures(g, run, json.loads(text))
+        else:
+            failures = jest_failures(g, run, json.loads(text))
+    except (OSError, ValueError, KeyError, TypeError):
+        failures = []
+    if not failures:
+        raise GateError(f"`{run.command}` failed, but its report names no failing test to tell apart.")
+    return failures
+
+
+def jest_failures(g: Gate, run: NodeTestRun, report: dict) -> list:
+    """From Vitest's or Jest's JSON report. A file that fails outside its tests (an import error, say) has no test to
+    tell apart, so it makes every failure a plain one."""
+    separator = " > " if run.runner == "vitest" else " "
+    failures = []
+    for result in report["testResults"]:
+        path = repo_path(g, result["name"])
+        failed = [a for a in result["assertionResults"] if a["status"] == "failed"]
+        if not path or (result["status"] == "failed" and not failed):
+            return []
+        for assertion in failed:
+            name = separator.join([*assertion.get("ancestorTitles", []), assertion["title"]])
+            failures.append(NodeFailure(run, f"{path}::{name}", name, path, (path,), ()))
+    return failures
+
+
+def cucumber_failures(run: NodeTestRun, text: str) -> list:
+    """From Cucumber's message report: a scenario runs its .feature file and the files holding the step definitions
+    and hooks it ran."""
+    found = {}
+    for line in text.splitlines():
+        for kind, message in (json.loads(line) if line.strip() else {}).items():
+            if isinstance(message, dict) and "id" in message:
+                found.setdefault(kind, {})[message["id"]] = message
+            elif kind == "testStepFinished":
+                found.setdefault(kind, {})[len(found.get(kind, {}))] = message
+    code_of = {key: m["sourceReference"]["uri"] for kind in ("stepDefinition", "hook")
+               for key, m in found.get(kind, {}).items()}
+    case_of = {m["id"]: m["testCaseId"] for m in found.get("testCaseStarted", {}).values()}
+    failed = {case_of[m["testCaseStartedId"]] for m in found.get("testStepFinished", {}).values()
+              if m["testStepResult"]["status"] not in ("PASSED", "SKIPPED")}
+    failures = []
+    for case_id in sorted(failed):
+        case = found["testCase"][case_id]
+        pickle = found["pickle"][case["pickleId"]]
+        code = {code_of[key] for step in case["testSteps"]
+                for key in [*step.get("stepDefinitionIds", []), step.get("hookId")] if key in code_of}
+        failures.append(NodeFailure(run, f"{pickle['uri']}::{pickle['name']}", pickle["name"], pickle["uri"],
+                                    tuple(sorted(code)), (pickle["uri"],)))
+    return failures
+
+
+def playwright_failures(g: Gate, run: NodeTestRun, report: dict) -> list:
+    """From Playwright's JSON report."""
+    root = Path(report["config"]["rootDir"])
+    failures = []
+
+    def walk(suite: dict, titles: list) -> None:
+        for spec in suite.get("specs", []):
+            if not spec["ok"]:
+                failures.append(playwright_failure(g, run, root / spec["file"], spec, titles))
+        for child in suite.get("suites", []):
+            walk(child, [*titles, child["title"]])
+
+    for top in report["suites"]:
+        walk(top, [])
+    return failures
+
+
+def playwright_failure(g: Gate, run: NodeTestRun, spec_file: Path, spec: dict, titles: list) -> NodeFailure:
+    """A test playwright-bdd generated runs its .feature file, the modules the generated file imports (the fixtures)
+    and the files holding the step definitions its steps match; any other test runs its spec file."""
+    name = " ".join([*titles, spec["title"]])
+    text = spec_file.read_text(encoding="utf-8")
+    generated = re.match(r"//\s*Generated from:\s*(\S+)", text)
+    if not generated:
+        path = repo_path(g, str(spec_file))
+        return NodeFailure(run, f"{path}::{name}", name, path, (path,), ())
+    feature = generated.group(1)
+    imports = [repo_path(g, str(spec_file.parent / target)) for target in re.findall(r"""^import .* from ["'](\.[^"']+)["']""", text, re.MULTILINE)]
+    data = re.search(r"// bdd-data-start(.*?)\]\s*;?\s*// bdd-data-end", text, re.DOTALL)
+    tests = json.loads("[" + data.group(1).strip().rstrip(",") + "]") if data else []
+    steps = [step["textWithKeyword"].partition(" ")[2] for test in tests if test.get("pwTestLine") == spec.get("line")
+             for step in test.get("steps", [])]
+    code = {f for f in imports if f} | step_definition_files(g, steps)
+    return NodeFailure(run, f"{feature}::{spec['title']}", name, feature, tuple(sorted(code)), (feature,))
+
+
+def step_definition_files(g: Gate, steps: list) -> set:
+    """The files holding a step definition that matches one of these step texts: every step definition file when one
+    of them matches none, so a step the gate can't place leaves nothing out."""
+    definitions = step_definitions(g)
+    files = set()
+    for step in steps:
+        matching = {d.location.rpartition(":")[0] for d in definitions if node_step_matches(d, step)}
+        if not matching:
+            return {d.location.rpartition(":")[0] for d in definitions}
+        files |= matching
+    return files
+
+
+def node_step_matches(definition: StepDefinition, step: str) -> bool:
+    pattern = definition.text if definition.kind == "regex" else cucumber_expression_regex(definition.text)
+    try:
+        return re.search(pattern, step) is not None
+    except re.error:
+        return True
+
+
+CUCUMBER_PARAMETERS = {
+    "int": r"-?\d+", "float": r"[-+]?(?:\d*\.)?\d+(?:[eE][-+]?\d+)?", "word": r"[^\s]+",
+    "string": r"""(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')""", "": r".*",
+}
+
+
+def cucumber_expression_regex(expression: str) -> str:
+    """A regex for a Cucumber expression: {parameters}, (optional text) and word/alternatives."""
+    words = []
+    for word in expression.split(" "):
+        alternatives = re.split(r"(?<!\\)/", word) if "{" not in word else [word]
+        pieces = []
+        for alternative in alternatives:
+            piece = ""
+            for match in re.finditer(r"\\(.)|\{([^}]*)\}|\(([^)]*)\)|(.)", alternative):
+                if match.group(0).startswith("{"):
+                    piece += CUCUMBER_PARAMETERS.get(match.group(2), ".*")
+                elif match.group(0).startswith("("):
+                    piece += f"(?:{re.escape(match.group(3))})?"
+                else:
+                    piece += re.escape(match.group(1) or match.group(4))
+            pieces.append(piece)
+        words.append(pieces[0] if len(pieces) == 1 else f"(?:{'|'.join(pieces)})")
+    return "^" + " ".join(words) + "$"
+
+
+def classify_node_failures(g: Gate, failures: list) -> dict:
+    """{test: Verdict} for every failing test. A failure is flaky when nothing on its test side (the files it runs
+    from, the test-side files they import, the .feature files it runs) changed since the base, and dependency-cruiser's
+    module graph leads from it to no production file this branch changed."""
+    graph = node_module_graph(g, sorted({entry for failure in failures for entry in failure.entries}))
+    production = set(g.production_files())
+    changed_production = set(g.code_files())
+    verdicts = {}
+    for failure in failures:
+        reached = reachable(graph, failure.entries)
+        test_side = sorted(set(failure.entries) | set(failure.features) | (reached - production))
+        verdicts[failure.test] = judge_failure(g, failure.file, test_side, sorted(reached & production),
+                                               changed_production)
+    return verdicts
+
+
+def node_module_graph(g: Gate, entries: list) -> dict:
+    """{repo file: [repo files it imports]} for the entries and everything they import, directly or not."""
+    if not entries:
+        return {}
+    modules = depcruise_modules(g, entries, minimal_depcruise_config(g), "flaky-tests")
+    return {module.get("source", ""): [d.get("resolved", "") for d in module.get("dependencies", [])
+                                       if in_repo(g, d.get("resolved", ""))] for module in modules}
+
+
+def in_repo(g: Gate, path: str) -> bool:
+    return bool(path) and "node_modules" not in path.split("/") and (g.root / path).is_file()
+
+
+def reachable(graph: dict, entries) -> set:
+    pending, seen = [target for entry in entries for target in graph.get(entry, [])], set()
+    while pending:
+        path = pending.pop()
+        if path not in seen:
+            seen.add(path)
+            pending.extend(graph.get(path, []))
+    return seen
+
+
+def unit_test_files_without(g: Gate, runs: list, failures: list) -> list:
+    """The Vitest or Jest test files StrykerJS runs when some hold flaky tests: all the others. Empty when none does."""
+    flaky_files = {failure.file for failure in failures if failure.run.runner in UNIT_RUNNERS}
+    if not flaky_files:
+        return []
+    files = set()
+    for run in runs:
+        if run.runner in UNIT_RUNNERS:
+            files |= {repo_path(g, result["name"]) for result in
+                      json.loads(run.report.read_text(encoding="utf-8"))["testResults"]}
+    return sorted(f for f in files - flaky_files if f)
 
 
 def node_audit_command(g: Gate) -> str:
@@ -2271,23 +2561,32 @@ def tracked(g: Gate, *patterns: str) -> list:
     return sorted(set(git(g.root, "ls-files", "-co", "--exclude-standard", "--", *patterns).splitlines()))
 
 
+def minimal_depcruise_config(g: Gate) -> str:
+    """A dependency-cruiser config that only resolves modules, for following imports without the repo's rules."""
+    config = g.out / "depcruise-atdd.cjs"
+    ts_config = "tsConfig: { fileName: 'tsconfig.json' }, " if (g.root / "tsconfig.json").exists() else ""
+    config.write_text("module.exports = { options: { " + ts_config + "tsPreCompilationDeps: true, "
+                      "doNotFollow: { path: 'node_modules' } } }\n", encoding="utf-8")
+    return str(config)
+
+
+def depcruise_modules(g: Gate, paths: list, config: str, log: str) -> list:
+    """dependency-cruiser's modules for the paths and everything they import, logged to logs/<log>.log."""
+    out = g.out / f"{log}-graph.json"
+    g.run(log, f"npx --no-install depcruise {' '.join(shlex.quote(p) for p in paths)} "
+               f"--config {shlex.quote(config)} --output-type json --output-to {shlex.quote(str(out))}")
+    try:
+        return json.loads(out.read_text(encoding="utf-8")).get("modules", [])
+    except (OSError, json.JSONDecodeError):
+        raise GateError("dependency-cruiser produced no module graph (npm i -D dependency-cruiser):\n"
+                        + g.tail(g.log_path(log), 20)) from None
+
+
 def node_dependency_graphs(g: Gate, production: list):
     """Namespaces are directories; projects are the workspace packages (directories holding a package.json)."""
     dirs = [d.strip("/") for d in g.gate_config.get("sourceDirs", ["src"]) if (g.root / d.strip("/")).exists()]
     configs = [n for n in DEPCRUISE_CONFIGS if (g.root / n).exists()]
-    config = configs[0] if configs else str(g.out / "depcruise-atdd.cjs")
-    if not configs:
-        ts_config = "tsConfig: { fileName: 'tsconfig.json' }, " if (g.root / "tsconfig.json").exists() else ""
-        Path(config).write_text("module.exports = { options: { " + ts_config + "tsPreCompilationDeps: true, "
-                                "doNotFollow: { path: 'node_modules' } } }\n", encoding="utf-8")
-    out = g.out / "dependency-graph.json"
-    g.run("dependency-cycles", f"npx --no-install depcruise {' '.join(shlex.quote(d) for d in dirs)} "
-                               f"--config {shlex.quote(config)} --output-type json --output-to {shlex.quote(str(out))}")
-    try:
-        modules = json.loads(out.read_text(encoding="utf-8")).get("modules", [])
-    except (OSError, json.JSONDecodeError):
-        raise GateError("dependency-cruiser produced no module graph (npm i -D dependency-cruiser):\n"
-                        + g.tail(g.log_path("dependency-cycles"), 20)) from None
+    modules = depcruise_modules(g, dirs, configs[0] if configs else minimal_depcruise_config(g), "dependency-cycles")
     known = set(production)
     if not any(m.get("source") in known for m in modules):
         raise GateError("dependency-cruiser's module graph contains none of the production files in sourceDirs, so cycles "

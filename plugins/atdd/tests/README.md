@@ -6,6 +6,8 @@ Four kinds, besides the eval cases in `../evals/`:
 
 - **`gate/`**: the quality gate's command line, in fast and full mode, against a throwaway Python repo built by `fixture.py` from the eval app below; asserts on `report.json`. No model calls; needs the Python stack's tools (see `skills/quality-gate/references/python.md`) and Node.js. `PATH="<venv>/bin:$PATH" python3 tests/gate/gate_test.py`
 
+  `node_gate_test.py` does the same for flaky-test classification on throwaway TypeScript (Vitest, Cucumber.js) and Next.js (Vitest, playwright-bdd without a browser) repos from `node_fixture.py`. It needs Node.js 22+ and diff-cover; the npm packages are installed once into `$TMPDIR/atdd-gate-node`, or into `ATDD_GATE_NODE_MODULES` if set. `python3 tests/gate/node_gate_test.py`
+
   `dotnet_gate_test.py` does the same against a throwaway .NET solution built by `dotnet_fixture.py` (xUnit, Reqnroll, coverlet; Stryker.NET 5.0.0 as a local tool for the full-mode test). Needs the .NET 10 SDK and diff-cover, and the NuGet packages in the local cache or reachable. `python3 tests/gate/dotnet_gate_test.py`
 
 - **`workflows/`**: the workflow scripts' control flow, with `agent()` and `workflow()` mocked. Fast, no model calls.
