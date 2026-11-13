@@ -44,6 +44,11 @@ it('answers in time with help', () => {
 })
 """
 
+GOALS_SETUP = """import { GoalBook } from '../src/goals.ts'
+
+export const book = new GoalBook()
+"""
+
 PUSH_FEATURE = """Feature: Push messages
 
   Scenario: The gateway answers in time
@@ -161,6 +166,20 @@ class TypeScriptGateTest(unittest.TestCase):
         fixture.add_to_base(self.repo, "test/helped.test.ts", FAILING_HELPED_TEST)
         fixture.add_to_feature(self.repo, "test/helpers.ts", PUSH_HELPER + "\nexport const TIMEOUT = 5\n")
         self.assert_tests_fail(fixture.run_gate(self.repo, "fast"), "test/helpers.ts")
+
+    def test_failing_test_whose_setup_file_reaches_changed_production_code_fails(self):
+        fixture.add_to_base(self.repo, "test/setup.ts", GOALS_SETUP)
+        fixture.add_to_base(self.repo, "vitest.config.mts", fixture.VITEST_CONFIG.replace(
+            "include: ['test/**/*.test.ts'],", "include: ['test/**/*.test.ts'],\n    setupFiles: ['./test/setup.ts'],"))
+        fixture.add_to_base(self.repo, "test/push.test.ts", FAILING_PUSH_TEST)
+        self.assert_tests_fail(fixture.run_gate(self.repo, "fast"), "imports reach changed production code: src/goals.ts")
+
+    def test_failing_test_fails_when_the_setup_files_can_not_be_read_from_the_config(self):
+        fixture.add_to_base(self.repo, "vitest.config.mts", fixture.VITEST_CONFIG.replace(
+            "include: ['test/**/*.test.ts'],", "include: ['test/**/*.test.ts'],\n    setupFiles: SETUP_FILES,").replace(
+            "export default", "const SETUP_FILES: string[] = []\n\nexport default"))
+        fixture.add_to_base(self.repo, "test/push.test.ts", FAILING_PUSH_TEST)
+        self.assert_tests_fail(fixture.run_gate(self.repo, "fast"), "setupFiles")
 
     def test_a_flaky_failure_beside_a_real_one_fails(self):
         fixture.add_to_base(self.repo, "test/push.test.ts", FAILING_PUSH_TEST)

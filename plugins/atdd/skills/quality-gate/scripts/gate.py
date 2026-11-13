@@ -2087,6 +2087,7 @@ def jest_failures(g: Gate, run: NodeTestRun, report: dict) -> list:
     """From Vitest's or Jest's JSON report. A file that fails outside its tests (an import error, say) has no test to
     tell apart, so it makes every failure a plain one."""
     separator = " > " if run.runner == "vitest" else " "
+    setup = setup_files(g, run)
     failures = []
     for result in report["testResults"]:
         path = repo_path(g, result["name"])
@@ -2095,8 +2096,63 @@ def jest_failures(g: Gate, run: NodeTestRun, report: dict) -> list:
             return []
         for assertion in failed:
             name = separator.join([*assertion.get("ancestorTitles", []), assertion["title"]])
-            failures.append(NodeFailure(run, f"{path}::{name}", name, path, (path,), ()))
+            failures.append(NodeFailure(run, f"{path}::{name}", name, path, (path, *setup), ()))
     return failures
+
+
+RUNNER_CONFIG_NAMES = {"vitest": ("vitest.config", "vite.config"), "jest": ("jest.config",)}
+RUNNER_CONFIG_EXTENSIONS = (".ts", ".mts", ".cts", ".js", ".mjs", ".cjs", ".json")
+SETUP_KEYS = {"vitest": ("setupFiles", "globalSetup"),
+              "jest": ("setupFiles", "setupFilesAfterEnv", "globalSetup", "globalTeardown")}
+STRING_LITERAL = r"""'([^'\\]*)'|"([^"\\]*)"|`([^`\\$]*)`"""
+SETUP_VALUE = re.compile(rf"""\s*(?:\[(?:\s*(?:{STRING_LITERAL})\s*,?)*\s*\]|{STRING_LITERAL})""")
+
+
+def setup_files(g: Gate, run: NodeTestRun) -> tuple:
+    """The repo files a Vitest or Jest run loads before every test file, because its config names them as setup or
+    global setup files; a GateError when the config names them in a way the gate can't read."""
+    config = runner_config(g, run)
+    if config is None:
+        return ()
+    text = config.read_text(encoding="utf-8")
+    if config.name == "package.json":
+        text = json.dumps(json.loads(text).get("jest") or {})
+    names = []
+    for key in SETUP_KEYS[run.runner]:
+        for match in re.finditer(rf"""\b{key}["']?\s*:""", text):
+            value = SETUP_VALUE.match(text, match.end())
+            if not value:
+                raise GateError(f"{g.rel(config)} sets {key} to something other than string literals, so the gate "
+                                "can't tell which setup files the tests load.")
+            names += ["".join(groups) for groups in re.findall(STRING_LITERAL, value.group(0))]
+    return tuple(sorted({path for name in names if (path := setup_file_path(g, config, name))}))
+
+
+def runner_config(g: Gate, run: NodeTestRun) -> Path | None:
+    """The config file the run's Vitest or Jest reads: the one its --config names, else the first default one."""
+    last = shlex.split(re.split(r"&&|\|\||;", run.command)[-1])
+    named = next((last[i + 1] for i, word in enumerate(last[:-1]) if word in ("--config", "-c")), None)
+    named = named or next((word.split("=", 1)[1] for word in last if word.startswith("--config=")), None)
+    if named:
+        return g.root / named
+    candidates = [g.root / f"{name}{extension}" for name in RUNNER_CONFIG_NAMES[run.runner]
+                  for extension in RUNNER_CONFIG_EXTENSIONS]
+    package = g.root / "package.json"
+    if run.runner == "jest" and package.is_file() and "jest" in json.loads(package.read_text(encoding="utf-8")):
+        candidates.append(package)
+    return next((c for c in candidates if c.is_file()), None)
+
+
+def setup_file_path(g: Gate, config: Path, name: str) -> str | None:
+    """The repo path of a setup file the config names; None for a package. A path the gate can't find is a GateError."""
+    relative = name.replace("<rootDir>", ".")
+    base = config.parent / relative
+    for candidate in (base, *(base.with_name(base.name + e) for e in (".ts", ".tsx", ".mts", ".js", ".jsx", ".mjs"))):
+        if candidate.is_file():
+            return repo_path(g, str(candidate))
+    if relative.startswith((".", "/")):
+        raise GateError(f"{g.rel(config)} names the setup file {name}, which the gate can't find.")
+    return None
 
 
 def cucumber_failures(run: NodeTestRun, text: str) -> list:
