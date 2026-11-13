@@ -15,7 +15,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from fixture import GATE, add_to_base, add_to_feature, commit, git, run_gate, write  # noqa: F401  (re-exported)
+from fixture import GATE, add_to_base, add_to_feature, commit, configure_gate, git, run_gate, write  # noqa: F401  (re-exported)
 
 PLUGIN = Path(__file__).resolve().parents[2]
 TEMPLATES = PLUGIN / "skills" / "quality-gate" / "templates"

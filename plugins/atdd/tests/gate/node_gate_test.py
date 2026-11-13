@@ -123,6 +123,16 @@ class TypeScriptGateTest(unittest.TestCase):
             self.assertIn(flaky, mutation["detail"])
         self.assertTrue(report["passed"], failures(report))
 
+    def test_mutation_override_gets_the_test_files_without_the_flaky_ones(self):
+        fixture.add_to_base(self.repo, "test/push.test.ts", FAILING_PUSH_TEST)
+        fixture.configure_stryker(self.repo, vitest={"configFile": "vitest.config.mts", "related": False})
+        fixture.configure_gate(self.repo, commands={"mutation": (
+            'npx --no-install stryker run --mutate src/goals.ts --testFiles "$ATDD_TEST_FILES_WITHOUT_FLAKY"')})
+        report = fixture.run_gate(self.repo, "full", "--only", "tests,mutation")
+        mutation = check(report, "mutation")
+        self.assertEqual("pass", mutation["status"], mutation["detail"])
+        self.assertIn("test/push.test.ts::answers in time", mutation["detail"])
+
     def test_failing_test_added_on_the_branch_fails(self):
         fixture.add_to_feature(self.repo, "test/push.test.ts", FAILING_PUSH_TEST)
         self.assert_tests_fail(fixture.run_gate(self.repo, "fast"), "added or changed on this branch")
