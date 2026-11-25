@@ -1,6 +1,8 @@
 ---
 name: implementer
 description: ATDD implementer. Binds the approved Gherkin scenarios as executable acceptance tests, implements the feature until they pass, commits, and fixes findings from the reviewer, quality-gate and QA agents. Used by the /atdd:build workflow.
+model: opus
+effort: medium
 skills:
   - atdd:gherkin-binding
   - atdd:coding-standards

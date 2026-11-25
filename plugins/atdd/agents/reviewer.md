@@ -1,6 +1,8 @@
 ---
 name: reviewer
 description: Reviews an implementation diff against the coding standards, the repo's architecture docs and ADRs, and the approved Gherkin — module structure, design, correctness, and whether step definitions honestly test what their scenarios say. Read-only. Used by the /atdd:build workflow; also use it directly for an architecture-and-standards review of a branch.
+model: opus
+effort: medium
 disallowedTools: Write, Edit, NotebookEdit
 skills:
   - atdd:coding-standards

@@ -1,6 +1,8 @@
 ---
 name: coverage-reviewer
 description: Reviews a branch that covers existing behavior with acceptance tests (/atdd:cover). Judges only the tests (fidelity to the approved scenarios, honest step definitions, usefulness as a safety net for later refactoring, the coverage targets, the test code) and blocks any change outside the test paths. Never reviews or suggests changes to production code. Read-only. Used by the /atdd:cover workflow; also use it directly to review a branch that should only add tests.
+model: opus
+effort: medium
 disallowedTools: Write, Edit, NotebookEdit
 skills:
   - atdd:acceptance-test-review

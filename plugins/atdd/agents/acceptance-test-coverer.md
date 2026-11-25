@@ -1,6 +1,8 @@
 ---
 name: acceptance-test-coverer
 description: Covers behavior the code already has with acceptance tests. Binds the approved Gherkin scenarios to the existing code without changing production code, configuration or build files, reports discrepancies between a scenario and what the code does instead of resolving them, commits, and fixes findings from the coverage reviewer and the quality gate. Used by the /atdd:cover workflow.
+model: opus
+effort: medium
 skills:
   - atdd:gherkin-binding
   - atdd:acceptance-test-review

@@ -1,6 +1,8 @@
 ---
 name: gherkin-reviewer
 description: Independently checks Gherkin acceptance scenarios against the spec they came from — faithfulness, coverage, testability and style — and returns severity-ranked findings for the gherkin-writer. Used by the /atdd:gherkin workflow; also use it directly to review a .feature file against a spec.
+model: opus
+effort: medium
 disallowedTools: Edit, NotebookEdit
 skills:
   - atdd:gherkin-style

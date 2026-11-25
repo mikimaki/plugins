@@ -1,6 +1,8 @@
 ---
 name: gherkin-writer
 description: Turns a product spec (from the issue tracker) into a requirements ledger and declarative Gherkin acceptance scenarios, and revises them from review findings. Used by the /atdd:gherkin workflow; also use it directly when asked to write or rework Gherkin for a spec.
+model: opus
+effort: medium
 skills:
   - atdd:gherkin-style
 ---

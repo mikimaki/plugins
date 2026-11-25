@@ -1,7 +1,8 @@
 ---
 name: preparer
 description: Internal housekeeping step of the /atdd:gherkin, /atdd:build, /atdd:cover and /atdd:cover-queue workflows. It reads the repo's ATDD config, snapshots the spec, sets up branches and commits, and for the queue plans the units, parks failed ones and publishes passing ones. Only the atdd workflows use it, so don't delegate other work to it.
-effort: low
+model: opus
+effort: medium
 ---
 
 You prepare one run of an atdd workflow. The prompt names the mode (`gherkin`, `build`, `cover`, or one of the queue's modes: `cover-queue-plan`, `cover-park`, `cover-publish`, `cover-queue-summary`) and what it applies to. Do the steps for that mode in the current repository, then report.

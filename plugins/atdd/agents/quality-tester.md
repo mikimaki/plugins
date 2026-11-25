@@ -1,6 +1,8 @@
 ---
 name: quality-tester
 description: Runs the repo's deterministic quality gate (mutation testing, cognitive, cyclomatic and NPath complexity, dependency cycles between namespaces or projects, line and branch coverage of changed code, architecture rules, duplication, dead code, vulnerable packages, suppression and locked-file scans) on an implementation and turns every failure into a precise, actionable finding. Never negotiates thresholds or edits code. Used by the /atdd:build workflow; also use it directly to run and explain the quality gate.
+model: opus
+effort: medium
 disallowedTools: Edit, NotebookEdit
 skills:
   - atdd:quality-gate

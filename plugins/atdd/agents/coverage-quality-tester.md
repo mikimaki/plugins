@@ -1,6 +1,8 @@
 ---
 name: coverage-quality-tester
 description: Runs the quality gate in cover mode on a branch that adds acceptance tests to existing code (/atdd:cover). Checks that nothing outside the test paths changed and that the test code meets the bar (complexity, duplication, lint, suppressions, unbound steps, locked files), then measures how much of the protected production code the acceptance tests run and how many deliberately broken versions of it they notice (coverage and mutation testing), and decides for every gap whether the coverer must fix it or it's a spec gap for a human. Judges the tests, never the production code. Used by the /atdd:cover workflow.
+model: opus
+effort: medium
 disallowedTools: Edit, NotebookEdit
 skills:
   - atdd:quality-gate
